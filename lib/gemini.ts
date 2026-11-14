@@ -1,31 +1,31 @@
 import "server-only";
 
 /**
- * Minimal REST client for the Gemini Interactions API: text, structured JSON, tool use,
- * background (long) interactions, images and Lyria music.
+ * Minimal REST client for the Gemini Interactions API: structured JSON (optionally with built-in tools
+ * like code execution) and Lyria music.
  * Docs: https://aistudio.google.com/docs/interactions (Api-Revision 2026-05-20).
  *
- * Gemini 4 notes: no sampling params (temperature/top_p/top_k are rejected or ignored), no "minimal"
- * thinking, max_output_tokens caps thinking + output together, and non-streaming foreground calls are
- * capped at 32,768 tokens on Argon/Carbon, so long generations run as background interactions.
+ * Gemini 4 notes: no sampling params (temperature/top_p/top_k), no "minimal" thinking, and
+ * max_output_tokens caps thinking + output together (foreground calls max 32,768 on Argon/Carbon).
  */
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const API_REVISION = "2026-05-20";
 
-/**
- * Model per job (all overridable):
- * - research: Hydrogen batches read/search tool calls in parallel and is cheapest.
- * - design: Carbon is the strongest reasoner with the strictest schema adherence.
- * - build: Argon, a frontier model with lower token spend per turn than Carbon.
- */
 export const MODELS = {
-  research: process.env.GEMINI_RESEARCH_MODEL || "gemini-4-hydrogen",
-  design: process.env.GEMINI_DESIGN_MODEL || "gemini-4-carbon",
-  build: process.env.GEMINI_BUILD_MODEL || "gemini-4-argon",
+  /** Fast backup when the design model is slow (see modelHedged). Hydrogen: fast and cheap. */
+  backup: process.env.GEMINI_BACKUP_MODEL || "gemini-4-hydrogen",
+  /** Models that logic with code execution. Argon: frontier reasoning with low token spend (Carbon is slower). */
+  design: process.env.GEMINI_DESIGN_MODEL || "gemini-4-argon",
   music: process.env.GEMINI_MUSIC_MODEL || "lyria-3-clip-preview",
-  image: process.env.GEMINI_IMAGE_MODEL || "gemini-nano-banana-2.1",
+  /** Video with reference images (Veo is retired in the Gemini API). 360p 15s ≈ $0.35. */
+  video: process.env.GEMINI_VIDEO_MODEL || "gemini-omni-1.2-flash",
+  /** Fast, calibrated closed-set judgements (yes/no, choice, rubric scores). Input tokens only. */
+  decision: process.env.GEMINI_DECISION_MODEL || "gemini-decision-1",
 };
+
+const FALLBACKS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-4-hydrogen,gemini-4-carbon").split(",").map((model) => model.trim()).filter(Boolean);
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
 
 function apiKey() {
   const key = process.env.GEMINI_KEY || process.env.GEMINI_API_KEY;
@@ -33,19 +33,9 @@ function apiKey() {
   return key;
 }
 
-type Block = { type?: string; text?: string; data?: string; mime_type?: string; mimeType?: string };
-type Step = { type?: string; content?: Block[]; id?: string; name?: string; arguments?: unknown };
-type Interaction = {
-  id?: string;
-  status?: string;
-  steps?: Step[];
-  outputs?: Block[];
-  error?: { message?: string };
-};
-
-/** Text models to fall back to when the preferred one is overloaded. */
-const TEXT_FALLBACKS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-4-argon,gemini-4-hydrogen,gemini-4-carbon").split(",").map((model) => model.trim()).filter(Boolean);
-const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+type Block = { type?: string; text?: string; data?: string; mime_type?: string; uri?: string };
+type Step = { type?: string; content?: Block[] };
+type Interaction = { id?: string; status?: string; steps?: Step[]; error?: { message?: string } };
 
 class GeminiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -61,146 +51,76 @@ async function post(body: Record<string, unknown>, signal?: AbortSignal): Promis
     signal,
     cache: "no-store",
   });
-  const json = (await response.json().catch(() => ({}))) as Interaction & { error?: { message?: string } };
-  if (!response.ok) {
-    throw new GeminiError(`Gemini ${body.model} failed (${response.status}): ${json.error?.message ?? "unknown error"}`, response.status);
-  }
-  return json;
+  const json = (await response.json().catch(() => ({}))) as Interaction;
+  if (!response.ok) throw new GeminiError(`Gemini ${body.model} failed (${response.status}): ${json.error?.message ?? "unknown error"}`, response.status);
+  return waitForCompletion(json, signal);
 }
 
-async function callOnce(body: Record<string, unknown>, signal?: AbortSignal): Promise<Interaction> {
-  const interaction = await waitForCompletion(await post(body, signal), signal);
-  if (interaction.status === "requires_continuation" || interaction.status === "incomplete") {
-    throw new Error(`Gemini ${body.model} ran out of output budget (${interaction.status}). Use a background interaction for long outputs.`);
+/** Interactions can come back still running; poll until they finish. */
+async function waitForCompletion(interaction: Interaction, signal?: AbortSignal): Promise<Interaction> {
+  let current = interaction;
+  for (let attempt = 0; attempt < 150 && current.id && ["in_progress", "queued", "pending", "running"].includes(current.status ?? ""); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const response = await fetch(`${ENDPOINT}/${current.id}`, { headers: { "x-goog-api-key": apiKey(), "Api-Revision": API_REVISION }, signal, cache: "no-store" });
+    if (!response.ok) throw new Error(`Gemini polling failed (${response.status})`);
+    current = (await response.json()) as Interaction;
   }
-  return interaction;
+  if (current.status === "failed") throw new Error(`Gemini interaction failed: ${current.error?.message ?? "unknown"}`);
+  if (current.status === "requires_continuation" || current.status === "incomplete") throw new Error(`Gemini ran out of output budget (${current.status}).`);
+  return current;
 }
 
-/** Models that recently answered 503/overloaded are skipped for a while. */
-const cooldownUntil = new Map<string, number>();
-const COOLDOWN_MS = 3 * 60_000;
-
-/**
- * Retries a transiently failing model once, then walks the fallback list (text models only).
- * Quota errors ("limit: 0", per-day caps) are not retried: they will not clear in seconds.
- */
-async function call(body: Record<string, unknown>, signal?: AbortSignal, fallbacks: string[] = []): Promise<{ interaction: Interaction; model: string }> {
-  const all = [body.model as string, ...fallbacks.filter((model) => model !== body.model)];
-  const warm = all.filter((model) => (cooldownUntil.get(model) ?? 0) < Date.now());
-  const models = warm.length ? warm : all;
+/** Tries the model, retries once on overload, then walks the fallbacks. Quota errors are not retried. */
+async function call(body: Record<string, unknown>, signal?: AbortSignal, fallbacks: string[] = []) {
+  const models = [body.model as string, ...fallbacks.filter((model) => model !== body.model)];
   let lastError: unknown;
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const interaction = await callOnce({ ...body, model }, signal);
-        cooldownUntil.delete(model);
-        return { interaction, model };
+        return { interaction: await post({ ...body, model }, signal), model };
       } catch (error) {
         lastError = error;
-        if (!(error instanceof GeminiError) || !RETRYABLE.has(error.status)) throw error;
-        if (/limit: 0|per day|quota/i.test(error.message)) throw error;
+        if (!(error instanceof GeminiError) || !RETRYABLE.has(error.status) || /limit: 0|per day|quota/i.test(error.message)) throw error;
         console.warn(`${error.message} (attempt ${attempt + 1})`);
-        if (error.status === 503) cooldownUntil.set(model, Date.now() + COOLDOWN_MS);
-        if (attempt === 0 && models.length === 1) await new Promise((resolve) => setTimeout(resolve, 2000));
-        else break;
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
   }
   throw lastError;
 }
 
-/** Interactions can come back still running; poll until they finish. */
-async function waitForCompletion(interaction: Interaction, signal?: AbortSignal): Promise<Interaction> {
-  let current = interaction;
-  for (let attempt = 0; attempt < 120 && current.id && isPending(current.status); attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    const response = await fetch(`${ENDPOINT}/${current.id}`, {
-      headers: { "x-goog-api-key": apiKey(), "Api-Revision": API_REVISION },
-      signal,
-      cache: "no-store",
-    });
-    if (!response.ok) throw new Error(`Gemini polling failed (${response.status})`);
-    current = (await response.json()) as Interaction;
-  }
-  if (current.status === "failed") throw new Error(`Gemini interaction failed: ${current.error?.message ?? "unknown"}`);
-  return current;
+function outputTexts(interaction: Interaction) {
+  return (interaction.steps ?? [])
+    .filter((step) => step.type === "model_output")
+    .map((step) => (step.content ?? []).filter((block) => block.type === "text" && block.text).map((block) => block.text).join(""))
+    .filter(Boolean);
 }
 
-function isPending(status?: string) {
-  return status === "in_progress" || status === "pending" || status === "running" || status === "queued";
-}
-
-/** Generation config with Gemini 4 knobs only (thinking level + output budget). */
-function config(thinking?: string, maxOutputTokens?: number) {
-  const generation: Record<string, unknown> = {};
-  if (thinking) generation.thinking_level = thinking;
-  if (maxOutputTokens) generation.max_output_tokens = maxOutputTokens;
-  return Object.keys(generation).length ? { generation_config: generation } : {};
-}
-
-/* ---------- Background interactions (long generations, polled later) ---------- */
-
-/** Starts a long text generation that runs on Gemini's side; poll it with getBackground(). */
-export async function startBackground(options: { model: string; prompt: string; thinking?: string; maxOutputTokens?: number }) {
-  const models = [options.model, ...TEXT_FALLBACKS.filter((model) => model !== options.model)];
-  let lastError: unknown;
-  for (const model of models) {
+/** Pulls the JSON object out of a reply that may also contain prose or fenced code (e.g. after code execution). */
+function extractJson<T>(texts: string[]): T {
+  const candidates = [texts.join(""), ...[...texts].reverse()];
+  for (const text of candidates) {
+    const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
     try {
-      const interaction = await post({ model, input: options.prompt, background: true, store: true, ...config(options.thinking, options.maxOutputTokens) });
-      if (!interaction.id) throw new Error("Gemini returned no interaction id for a background run.");
-      return { id: interaction.id, model };
-    } catch (error) {
-      lastError = error;
-      if (!(error instanceof GeminiError) || !RETRYABLE.has(error.status) || /limit: 0|per day|quota/i.test(error.message)) throw error;
-      console.warn(`${error.message} (trying next model)`);
+      return JSON.parse(cleaned) as T;
+    } catch {}
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(cleaned.slice(start, end + 1)) as T;
+      } catch {}
     }
   }
-  throw lastError;
-}
-
-export type BackgroundState = { status: "running" | "completed" | "failed"; text: string; error?: string };
-
-export async function getBackground(id: string): Promise<BackgroundState> {
-  const response = await fetch(`${ENDPOINT}/${encodeURIComponent(id)}`, {
-    headers: { "x-goog-api-key": apiKey(), "Api-Revision": API_REVISION },
-    cache: "no-store",
-  });
-  if (!response.ok) return { status: "failed", text: "", error: `Polling failed (${response.status})` };
-  const interaction = (await response.json()) as Interaction;
-  if (isPending(interaction.status)) return { status: "running", text: "" };
-  const text = outputText(interaction);
-  if (interaction.status === "completed" && text) return { status: "completed", text };
-  return { status: "failed", text, error: interaction.error?.message ?? `Ended with status ${interaction.status}` };
-}
-
-function outputBlocks(interaction: Interaction): Block[] {
-  const fromSteps = (interaction.steps ?? []).filter((step) => step.type === "model_output").flatMap((step) => step.content ?? []);
-  return fromSteps.length ? fromSteps : interaction.outputs ?? [];
-}
-
-function outputText(interaction: Interaction) {
-  return outputBlocks(interaction).filter((block) => block.type === "text" && block.text).map((block) => block.text).join("");
-}
-
-export async function generateText(options: { model: string; prompt: string; thinking?: string; maxOutputTokens?: number; signal?: AbortSignal }) {
-  const { interaction, model } = await call(
-    {
-      model: options.model,
-      input: options.prompt,
-      ...config(options.thinking, options.maxOutputTokens ?? 32_768),
-    },
-    options.signal,
-    TEXT_FALLBACKS,
-  );
-  const text = outputText(interaction);
-  if (!text) throw new Error(`Gemini ${model} returned no text.`);
-  return { text, model };
+  throw new Error("Gemini did not return valid JSON.");
 }
 
 export async function generateJson<T>(options: {
   model: string;
   prompt: string;
   schema: Record<string, unknown>;
+  /** Built-in tools, e.g. [{ type: "code_execution" }]. */
+  tools?: Array<Record<string, unknown>>;
   thinking?: string;
   maxOutputTokens?: number;
   signal?: AbortSignal;
@@ -210,152 +130,88 @@ export async function generateJson<T>(options: {
       model: options.model,
       input: options.prompt,
       response_format: { type: "text", mime_type: "application/json", schema: options.schema },
-      ...config(options.thinking, options.maxOutputTokens ?? 32_768),
+      ...(options.tools?.length ? { tools: options.tools } : {}),
+      // Runs on Gemini's side and is polled, so long tool-using turns never hold one HTTP request open.
+      background: true,
+      store: true,
+      generation_config: {
+        ...(options.thinking ? { thinking_level: options.thinking } : {}),
+        max_output_tokens: options.maxOutputTokens ?? 32_768,
+      },
     },
     options.signal,
-    TEXT_FALLBACKS,
+    FALLBACKS,
   );
-  const text = outputText(interaction).trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
-  try {
-    return { data: JSON.parse(text) as T, model };
-  } catch {
-    throw new Error("Gemini returned a puzzle design that was not valid JSON.");
-  }
+  return { data: extractJson<T>(outputTexts(interaction)), model };
 }
 
 export async function generateMusic(options: { prompt: string; signal?: AbortSignal }) {
   const { interaction } = await call({ model: MODELS.music, input: options.prompt }, options.signal);
-  const audio = outputBlocks(interaction).find((block) => block.type === "audio" && block.data);
+  const audio = (interaction.steps ?? [])
+    .filter((step) => step.type === "model_output")
+    .flatMap((step) => step.content ?? [])
+    .find((block) => block.type === "audio" && block.data);
   if (!audio?.data) throw new Error("Lyria returned no audio.");
-  const mime = audio.mime_type || audio.mimeType || "audio/mpeg";
+  const mime = audio.mime_type || "audio/mpeg";
   return { bytes: Buffer.from(audio.data, "base64"), mimeType: mime, extension: mime.includes("wav") ? "wav" : "mp3" };
 }
 
-/** One image via the Interactions API. Paid-tier only; callers must cope with failure. */
-export async function generateImage(options: { prompt: string; aspectRatio?: string; signal?: AbortSignal }) {
+/**
+ * A short clip from Gemini Omni Flash at its lowest resolution (360p), with optional reference images (up to 3 per
+ * character, 2 characters). Runs in the background and is polled. Returns MP4 bytes.
+ */
+export async function generateVideo(options: { prompt: string; images?: Array<{ data: Buffer; mimeType: string }>; seconds: number; signal?: AbortSignal }) {
   const { interaction } = await call(
     {
-      model: MODELS.image,
-      input: options.prompt,
-      response_format: { type: "image", mime_type: "image/jpeg", aspect_ratio: options.aspectRatio ?? "1:1", image_size: "1K" },
+      model: MODELS.video,
+      input: [
+        ...(options.images ?? []).map((image) => ({ type: "image", data: image.data.toString("base64"), mime_type: image.mimeType })),
+        { type: "text", text: options.prompt },
+      ],
+      response_format: { type: "video", resolution: "360p", aspect_ratio: "16:9", duration: `${options.seconds}s` },
+      background: true,
+      store: true,
     },
     options.signal,
   );
-  const image = outputBlocks(interaction).filter((block) => block.type === "image" && block.data).pop();
-  if (!image?.data) throw new Error("Image model returned no image.");
-  const bytes = Buffer.from(image.data, "base64");
-  const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
-  return { bytes, mimeType: isPng ? "image/png" : "image/jpeg", extension: isPng ? "png" : "jpg" };
+  const video = (interaction.steps ?? [])
+    .filter((step) => step.type === "model_output")
+    .flatMap((step) => step.content ?? [])
+    .find((block) => block.type === "video" && (block.data || block.uri));
+  if (video?.data) return { bytes: Buffer.from(video.data, "base64"), mimeType: video.mime_type || "video/mp4" };
+  if (video?.uri) {
+    const response = await fetch(video.uri, { headers: { "x-goog-api-key": apiKey() }, signal: options.signal, cache: "no-store" });
+    if (!response.ok) throw new Error(`Video download failed (${response.status})`);
+    return { bytes: Buffer.from(await response.arrayBuffer()), mimeType: video.mime_type || "video/mp4" };
+  }
+  throw new Error("Gemini Omni returned no video.");
 }
 
-/* ---------- Tool use (function calling) ---------- */
+/* ---------- Decisions API: calibrated yes/no, choice and rubric answers ---------- */
 
-export type Tool = {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-  /** Runs the tool; return text for the model. Throwing reports the error back to the model. */
-  run?: (args: Record<string, unknown>) => Promise<string>;
-};
+export type DecisionQuestion =
+  | { type: "noul"; instructions: string }
+  | { type: "choice"; instructions: string; criteria: Record<string, string> }
+  | { type: "score"; instructions: string; criteria: string[] };
 
-type ToolCall = { id: string; name: string; args: Record<string, unknown> };
-
-function toolCalls(interaction: Interaction): ToolCall[] {
-  return (interaction.steps ?? [])
-    .filter((step) => step.type === "function_call" && step.id && step.name)
-    .map((step) => {
-      let args = step.arguments;
-      if (typeof args === "string") {
-        try {
-          args = JSON.parse(args);
-        } catch {
-          args = {};
-        }
-      }
-      return { id: step.id!, name: step.name!, args: (args ?? {}) as Record<string, unknown> };
-    });
-}
+export type DecisionAnswer =
+  | { type: "noul"; noul: number; confidence: number }
+  | { type: "choice"; choice: string; probabilities: Record<string, number>; confidence: number }
+  | { type: "score"; score: number; probabilities: Record<string, number>; confidence: number };
 
 /**
- * Lets the model think and call tools for several turns (stateful via previous_interaction_id),
- * until it calls `finishTool`, stops calling tools, or runs out of turns/time.
- * The finish tool is declared like any other but has no `run`; its arguments are the result.
+ * Asks many closed questions about one shared input in a single fast call (POST /v1beta/decisions).
+ * yes/no answers are P(yes); scores are the probability-weighted mean level index (0 = first criterion).
  */
-export async function runToolLoop(options: {
-  model: string;
-  prompt: string;
-  tools: Tool[];
-  finishTool: string;
-  thinking?: string;
-  maxTurns: number;
-  deadline: number;
-  onCall?: (call: ToolCall) => void;
-  signal?: AbortSignal;
-}) {
-  const declarations = options.tools.map(({ name, description, parameters }) => ({ type: "function", name, description, parameters }));
-  const genConfig = options.thinking ? { thinking_level: options.thinking } : {};
-  const log: Array<{ name: string; args: Record<string, unknown>; result: string }> = [];
-
-  let model = options.model;
-  try {
-    const first = await call(
-      { model: options.model, input: options.prompt, tools: declarations, generation_config: genConfig },
-      options.signal,
-      TEXT_FALLBACKS,
-    );
-    model = first.model;
-    let interaction = first.interaction;
-
-    for (let turn = 1; ; turn++) {
-      const calls = toolCalls(interaction);
-      const finish = calls.find((entry) => entry.name === options.finishTool);
-      if (finish) return { result: finish.args, model, log, fallbackText: "" };
-      if (!calls.length) return { result: null, model, log, fallbackText: outputText(interaction) };
-
-      const results = await Promise.all(
-        calls.map(async (entry) => {
-          options.onCall?.(entry);
-          const tool = options.tools.find((candidate) => candidate.name === entry.name);
-          let text: string;
-          let isError = false;
-          try {
-            if (!tool?.run) throw new Error(`Unknown tool ${entry.name}`);
-            text = await tool.run(entry.args);
-          } catch (error) {
-            text = error instanceof Error ? error.message : "Tool failed";
-            isError = true;
-          }
-          log.push({ name: entry.name, args: entry.args, result: text });
-          return { type: "function_result", name: entry.name, call_id: entry.id, is_error: isError, result: [{ type: "text", text }] };
-        }),
-      );
-
-      const outOfBudget = turn >= options.maxTurns || Date.now() > options.deadline;
-      try {
-        ({ interaction } = await call(
-          {
-            model,
-            previous_interaction_id: interaction.id,
-            input: results,
-            tools: declarations,
-            generation_config: outOfBudget
-              ? { ...config, tool_choice: { allowed_tools: { mode: "any", tools: [options.finishTool] } } }
-              : config,
-          },
-          options.signal,
-        ));
-      } catch (error) {
-        console.error("Tool loop stopped early", error);
-        return { result: null, model, log, fallbackText: "" };
-      }
-      if (outOfBudget) {
-        const finishCall = toolCalls(interaction).find((entry) => entry.name === options.finishTool);
-        return { result: finishCall?.args ?? null, model, log, fallbackText: outputText(interaction) };
-      }
-    }
-  } catch (error) {
-    // Timeouts/aborts or API errors: hand back whatever was gathered so far.
-    console.error("Tool loop ended early", error);
-    return { result: null, model, log, fallbackText: "" };
-  }
+export async function decide(input: string, questions: Record<string, DecisionQuestion>, signal?: AbortSignal) {
+  const response = await fetch("https://generativelanguage.googleapis.com/v1beta/decisions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey() },
+    body: JSON.stringify({ model: MODELS.decision, input, questions }),
+    signal,
+    cache: "no-store",
+  });
+  const json = (await response.json().catch(() => ({}))) as { answers?: Record<string, DecisionAnswer>; error?: { message?: string } };
+  if (!response.ok || !json.answers) throw new Error(`Gemini Decisions failed (${response.status}): ${json.error?.message ?? "no answers"}`);
+  return json.answers;
 }

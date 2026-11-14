@@ -1,71 +1,125 @@
 # SlopHop — Working Notes for Agents
 
-Keep this file current as SlopHop evolves. It is the shared project brief and should describe what is true now, not aspirational architecture.
+Keep this file current as SlopHop evolves. It describes what is true now.
 
 ## Product
 
-SlopHop helps a human feel safe (or rightly unsafe) merging a possibly AI-written pull request. Each PR becomes an intuitive, playable model of the change. Curious non-coders play it and answer a small, **standardized** set of judgments; those add up to a crowd review with a merge signal that can be pasted into the PR.
+SlopHop shows curious people what is changing in the public software around them, as tiny brain teasers.
+Every puzzle is built from one real, public GitHub pull request, cut down to one small piece of logic, so players'
+answers and votes can be crowdsourced per case.
 
-Flow:
+Two mascots star in everything:
+- **Green** = code the PR **added**.
+- **Red** = code the PR **removed**.
 
-1. **"New puzzle"** (or a pasted PR URL) picks a real, merged, public GitHub PR with puzzle-sized branching logic.
-2. **Research** (`lib/research.ts`, Gemini 4 Hydrogen): browses the repo with our own tools (`read_file`, `search_code`, `list_dir`, pinned to the PR's commit, using `GITHUB_TOKEN`) for ≤6 turns / 50s (hard stop 90s), then returns notes via `finish_research`. Built-in `url_context` is not a substitute: it can't list/search a repo, is capped at 20 known URLs and isn't commit-pinned.
-3. **Design** (Gemini 4 Carbon, structured JSON): ONE puzzle game: a one-line briefing + `promise` + `system` chain; its own `artDirection` (no predefined styles; recent games' names are passed so it differs); one core `mechanic` (a few shuffled ideas from `lib/catalog.ts` as inspiration); `rulesBefore`/`rules`; 4–6 `levels` with setup + intended solution, one per beat (`intro`?, `fix`, `tradeoff-0`?, `case-N`, `hunt` last); judged subjects (`solved`, ≤1 `tradeoffs`, 1–2 `cases`) with the AI's hidden views; `codeSpots` (resolved against the real diff); 4 sprites + cover prompt.
-4. **Build** (Gemini 4 Argon, high thinking): started as a **background interaction** (`background: true`, up to 65,536 output tokens) so long, careful builds aren't capped by the 32,768-token foreground limit or Vercel's function timeout. Art (`gemini-nano-banana-2.1`) and Lyria music run in the request meanwhile. The puzzle is saved as `status: "building"`; `advanceBuild()` (called by `GET /api/puzzles/[id]/status`, the shelf and the play page) collects the result, runs `checkGame`, and starts up to two repair/retry passes.
-5. **Play** (`app/play/[id]`): briefing → the game (served from `/api/puzzles/[id]/game` with a sandboxing CSP header) → standardized judgment cards raised by the game → hunt → summary with the crowd review and "Copy as PR comment". Calm: no timers anywhere.
+They are pixel-art (exact 19x19 head from the reference + a procedurally drawn 2px leg), rendered at native size and
+scaled up with nearest-neighbour. Look and feel: PS1 / Nintendo DS shading, Parappa the Rapper vibes, two-screen handheld UI.
 
-Puzzles carry `format: 5`; anything older is hidden (no backwards compatibility).
+## How a puzzle is made (`lib/puzzles.ts`)
 
-SlopHop never approves code itself, never labels a PR as AI-generated, and does not imply PR author endorsement.
+Everything that can run in parallel does:
 
-## Standardized outcome (`lib/review.ts`)
+1. `findCandidatePullRequests(50)` (`lib/github.ts`): four GitHub searches (100 results each, two at a time: the search API
+   has a burst limit) for recent merged PRs **made with AI
+   coding tools**, found by each tool's own signature (Claude Code footer, Copilot / Devin / Jules agent authors, Codex task
+   links, Cursor footer); every result is re-checked with `madeWithTool` before loading and dropped without a real signature
+   (search matches loosely). Dependency bots and chore PRs filtered out; ~70 loaded with diffs, 12 at a time (`settleLimited`,
+   `lib/limit.ts`; ~140 GitHub calls of the 5,000/hour budget), top 50 by a branching-logic heuristic (no surrounding code yet). A pasted PR URL skips this. (~8s)
+2. **Rank with the Gemini Decisions API** (`gemini-decision-1`, `POST /v1beta/decisions`, `decide()` in `lib/gemini.ts`): one call
+   per candidate, 10 at a time, asking calibrated rubric/yes-no questions (logic, small & self-contained, relatable, plain,
+   noise). Combined into a 0–1 score; best wins. Falls back to the heuristic order if the API fails. (a few seconds for 50)
+3. **In parallel from here:** `designFlair` (`gemini-4-hydrogen`, low thinking) writes the project's music line (lead
+   instrument and sounds, ≤40 words), picks a tempo that fits the project (76–132 BPM, saved as `bpm`) and two **props** built from PS1 primitives (`PropSpec`: box/cylinder/sphere/cone/torus parts,
+   clamped by `cleanProps`); then Lyria composes the loop (`composeMusic`): that line up front over the same base every time (90s
+   PlayStation rhythm-game, lo-fi hip hop, seamless) at that tempo. (~15s) The same call writes a 15s **cutscene** script (3–4 beats:
+   time, speaker, one plain line about the change, what we see), and **Gemini Omni Flash** (`generateVideo`, `gemini-omni-1.2-flash`,
+   360p, 15s, ≈$0.35; Veo is retired in the Gemini API) films it as a 1998 PlayStation FMV with the real mascot sprites as
+   reference images (`lib/sprites.ts` renders them to PNG), timecoded from the beats, no on-screen text. The prompt
+   insists the mascots are a head on one stick leg (no arms, hands, torso or second leg) and act with their heads. (~40s, runs alongside
+   the modelling; saved as `fmv.mp4`.) Meanwhile `addContext()` loads the code around the winner's changes.
+4. **Model** (`gemini-4-argon`, background interaction, `code_execution` + JSON schema): picks the smallest meaningful decision,
+   writes **rulebooks** (Red's old rules, Green's new rules, plain "If…, then…" lines that let a player derive every case), the
+   scene (`where`, `scenario`, condition explanations, a story phrase per value), and fills the full truth table by **running
+   Python** old()/new() models. **Hedged:** if Argon hasn't answered in 40s (or fails), `gemini-4-hydrogen` starts in parallel and
+   the first valid answer wins (`modelHedged`). (~30–50s)
+5. Our code validates the table, cuts the real diff lines (`resolveCode`) and **builds the rounds itself** (`buildRounds`).
+   Gemini never writes UI, styles or game code. Saved as `puzzles/{id}/meta.json` (+ `music.mp3`), `format: 6`.
 
-Question keys and answers (asked by the host, never by the game):
+Progress events carry the top-5 ranked cards (with scores) and drive the top-screen show. A run takes ~60s (the cutscene finishes last).
 
-| Key | Question | Answers |
-|---|---|---|
-| `fix` | Did the change fix it? | `works` / `partly` / `no` |
-| `tradeoff-<i>` | Is this tradeoff worth it? | `worth` / `unsure` / `not` |
-| `case-<i>` | Could this happen for real? | `likely` / `rare` / `never` |
+## Playing
 
-Plus the free-hunt verdict (`holds` / `breaks` + evidence). `buildReport()` turns tallies into findings (good/warn/bad) and a signal: `safe`, `caution`, `risky`, or `unknown` (<3 fix votes), plus PR-comment markdown. The AI's answer is shown after the player answers, for comparison.
+- Home (`components/HomeDS.tsx`): DS shell, PS1 stage with both mascots dancing, dialogue box, menu of puzzles, "+ New puzzle"
+  (progress narrated by Green and Red), optional PR link. While generating, the stage puts on a show (`StageShow` modes):
+  fetching (billboard types the PR list, 5 PR cards drop in) → reading (real diff lines scroll in green/red, cards hop, +/− rain)
+  → picked (the winner hops onto the stage, the rest sink) → modelling (a truth table fills in, faster beat) → done (confetti).
+  `/?demo` plays the whole show with sample data and no API calls. Intro music: a random puzzle's track, from the first tap.
+- Tutorial (`components/HowToPlay.tsx`), on the landing page: first visit only (localStorage `slophop-tutorial-done`), Red, Green
+  and SlopHop explain the game on the top screen while a How to play card in the menu lights up step by step (including making
+  your own puzzle from a real AI-made PR); "?" replays it.
+- Play (`components/PlayDS.tsx`): the cutscene, if the puzzle has one (`components/Fmv.tsx`: drawn into a ~256px canvas with
+  the stage's dither + 15-bit colour, whole-number scale, its lines typed into the text box at their times, tap to skip), then intro dialogue (project, where the code lives, the scene, the change, Red's and Green's lines,
+  each condition explained, the decision) with the PR card and the rulebooks as speech bubbles (Red's head + his old rules,
+  Green's head + his new ones; changed lines tagged NEW / GONE, unchanged ones dimmed); rounds describe their case as a story built from each value's
+  `story` phrase; a "?" glossary lists every condition and outcome →
+  3–5 rounds on the bottom screen → end screen with score, "where players doubt Green", the real diff and the PR link.
+- Every step is ONE decision that fits the fixed bottom screen and can be reasoned out from the rulebooks (shown on the intro and
+  behind the "Rules" button). Round kinds (`lib/types.ts`, chosen by `buildRounds`):
+  - `predict` — given a case, what does Green (or, for `side: "old"`, Red) do?
+  - `who` — given a case and a result: Red's old rules or Green's new ones?
+  - `tweak` — from a case where they agree, which ONE "what if…" change makes them disagree (or makes Green hit a bad outcome)?
+  - `pattern` — a mini table of solved neighbouring cases and a mystery row: what goes in the "?"
+  - `edge` — along an ordered condition, tap the gap where Green changes its mind.
+  - `odd` — odd one out: three cases end the same with Green, one doesn't.
+  - `rule` — finish Green's rule: "when ___, I always end at X" (only rules that really hold).
+  - `pivot` — in this case only one condition decides Green's outcome: which?
+  - `claim` — Red claims "when X is Y, Green always does Z"; true or false.
+  Order: apply a rule → where the change bites (tweak) → shuffled mix → try to break it (tweak to a bad outcome).
+  Each step shows the rules it is about as the owner's speech bubble (`RuleBubble`: Green's, Red's for "what did Red do", both
+  for `who`) above a case box tagged THE CASE. If a step would overflow, PlayDS adds `.dense` (tighter padding), then `.no-rules`
+  (the bubble becomes a one-line "tap to read" strip), then `.denser` (drops the strip and `.can-hide`, e.g. one spare pattern row).
+  `/play/{id}?round=N` jumps to step N; `&qa` logs whether the step overflows (`&qa=answer` also auto-answers).
+- Crowd signal: after each reveal, "Is Green's way right for this case?" → `votes/{id}/{rowKey}/{right|off}/{ts}.json`.
 
-## Stack and layout
+## Enforced components and style
 
-- Next.js 16 App Router + TypeScript, plain CSS in `app/globals.css`.
-- `lib/style.ts` — app tokens (`--sh-*`, clean thin-line look), `gameCraft` (shared craft bar; each game picks its own theme), `musicDirection`. The owner is putting their own touch on the app style: keep it minimal and easy to edit.
-- `lib/gemini.ts` — REST client for the Gemini Interactions API (`POST /v1beta/interactions`, `Api-Revision: 2026-05-20`): text, structured JSON, background interactions (`startBackground`/`getBackground`), images, music, and `runToolLoop()` (function calling via `previous_interaction_id`, parallel calls, forced finish when out of budget). Gemini 4 rules: no sampling params, thinking `low|medium|high` (+`xhigh` on Hydrogen), `max_output_tokens` covers thinking + output, foreground calls capped at 32,768 on Argon/Carbon. Retries/fallbacks across Gemini 4 models on 429/5xx.
-- `lib/github.ts` — PR search, diff, excerpts and `createRepoBrowser()` (overview, read file, list dir, code search). Random picks are NOT filtered for AI authorship yet.
-- `lib/research.ts` — the research agent and its notes.
-- `lib/puzzles.ts` — design/build prompts, pipeline, storage of puzzles, verdicts and judgments, `wrapGame()`.
-- `lib/review.ts` — client-safe: questions, answers, AI answers, report.
-- `lib/puzzle-view.ts` — client-safe display helpers incl. early-format puzzles.
-- `lib/catalog.ts` — mechanic ideas offered as inspiration (no art styles: games invent their own).
-- `components/` — `PuzzlePlayer` (iframe host), `Briefing`, `SystemStrip`, `CodePeek` (contextual "why?" tag + card), `JudgeCard`, `Summary`, `ReviewPanel`, `BuildWatcher`, `useSoundtrack`, `Generator`, `PuzzleCard`, `Frog`. Overlays become bottom sheets on phones.
-- API: `POST /api/puzzles` (NDJSON progress stream, `maxDuration` 300), `GET /api/puzzles/[id]/game`, `GET /api/puzzles/[id]/status` (advances background builds), `GET /api/puzzles/[id]/assets/[cover|sprites]`, `GET /api/puzzles/[id]/music`, `POST /api/puzzles/[id]/verdicts`, `POST /api/puzzles/[id]/judgments` (`{ key, answer, detail }`).
+- `lib/mascot.ts` — pixel data + `drawMascot(ctx, kind, t, mood)`; moods: idle, talk, dance, cheer, shake.
+- `components/PS1Stage.tsx` — three.js at ~256 wide, at a whole-number device-pixel scale (render size adapts to the box): vertex snapping, Gouraud vertex lighting, affine UVs, 4×4 ordered dither,
+  15-bit colour, fog; checkerboard floor, pink stage, beat-thumping speakers, floating +/−, a dark-grey pixel-text "TV" (lighter than
+  the mascots' black legs, so they still read in front of it), PR cards, +/− rain, confetti; mascots as
+  paper-thin billboards. Driven by a mutable `StageState` ref (moods, bpm, `show`).
+- `lib/pixelfont.ts` — hand-drawn 3×5 pixel font (`drawText`) for crisp text on tiny canvases.
+- `components/DS.tsx` — `DSShell` (two screens + hinge), `TextBox` (typewriter dialogue, name tags GREEN/RED/SLOPHOP), `Mascot`.
+- `components/Rounds.tsx` — `InputTiles`, `Outcomes`, `OutcomeCards`, `WhoPick`, `Vote`, `CodeCard`.
+- Screens: top 4:3, bottom 25:23, fixed; on desktop the handheld is sized from the window height so the page never scrolls; on
+  phones it is exactly one viewport. Puzzle steps never scroll; info panels (intro, rules, end, home menu) may.
+- `app/globals.css` — all tokens and components (pixel buttons, controls, cases, dialogue, code). Font: DotGothic16, only at
+  16/32/48px so every dot is a whole pixel (no letter-spacing, no synthetic bold). Colour rule: green and red ONLY mean Green
+  (new code / added lines) and Red (old code / removed lines); feedback and actions use yellow, ink and greys.
+  On phones the shell disappears and the two screens fill the viewport.
+- `lib/sound.ts` — shared AudioContext: gapless music loop, chiptune UI blips, mute. `musicBeat()` is a beat clock at the puzzle's
+  `bpm` (96 for older puzzles) from the track's start, restarting each loop; the stage and every mascot dance to it. `loopable` makes
+  the clip loop cleanly: trims MP3 padding and any fade-out, cuts to whole bars at `bpm`, and crossfades the seam. Lyria clip has
+  no tempo setting, so the tempo is only asked for in the prompt and can be a little off. `voice(who, char)`: Animal
+  Crossing-style babble per letter, Green high and chirpy, Red low and gruff, with a rise at the end of questions.
 
-Storage (answer in the path so tallies need only a list call): `puzzles/{id}/{meta.json,game.html,cover.jpg,sprites.jpg,music.mp3}`, `verdicts/{id}/{holds|breaks}/{ts}-{rand}.json`, `judgments/{id}/{key}/{answer}/{ts}-{rand}.json`.
+## Stack
 
-## Game contract (generated HTML)
-
-- Sandboxed by CSP header (`sandbox allow-scripts`, opaque origin) and the iframe `sandbox`. CSP allows inline code, Google Fonts, three.js r170 (import map) and images from our origin. No network.
-- `await SlopHop.started` (sent when the briefing closes). No start or title screen.
-- One core mechanic across 4–6 levels; direct manipulation via pointer events; ≤6 buttons; calm (no timers, lives or failure screens).
-- After each judged level: `await SlopHop.judge("fix")`, `("tradeoff", 0)`, `("case", i, { outcome, brokePromise })`. The hunt ends with `SlopHop.verdict({ verdict, evidence, score })`.
-- Code peeks are contextual: `SlopHop.peek(id, element, "what just happened")` only right AFTER the player saw that effect. The host shows a "why?" tag at the element; the player taps it for what happened → why → the real diff. Never auto-opens.
-- Standard elements (injected, styleable via `--sh-ui-*` CSS vars): `<sh-promise>` (+ `SlopHop.promise("ok"|"strained"|"broken")`), `<sh-switch old new>` (old/new code switch, `change` event), `<sh-goal level>`, `<sh-hint>`, `<sh-progress total current>`.
-- `SlopHop.sfx(name)` procedural sound kit; `SlopHop.assets.cover` / `SlopHop.sprite(i)` generated art with required fallbacks.
-- Art direction is the game's own; craft bar in `STYLE.gameCraft`; text per `STYLE.plainLanguage`. Fun and witty for adults, never childish.
-- Game → host: `{ source: "slophop", type: "judge" | "peek" | "verdict" }`. Host → game: `{ source: "slophop-host", type: "start" | "judged" | "mute" }`.
+- Next.js 16 App Router + TypeScript, three.js 0.170, plain CSS.
+- `lib/gemini.ts` — Interactions API (`Api-Revision: 2026-05-20`): `generateJson` (background + polling, optional built-in tools,
+  robust JSON extraction), `generateMusic`. Gemini 4: no sampling params, thinking `low|medium|high`.
+- `lib/storage.ts` — Vercel Blob when `BLOB_READ_WRITE_TOKEN` is set, else local `.data/`.
+- API: `POST /api/puzzles` (NDJSON progress), `GET /api/puzzles/[id]/music`, `GET /api/puzzles/[id]/fmv`, `POST /api/puzzles/[id]/votes`.
 
 ## Rules
 
-- Keep `GEMINI_KEY`, `GITHUB_TOKEN`, `BLOB_READ_WRITE_TOKEN` server-side. Never call Gemini, GitHub or Blob from the client.
-- Treat generated game HTML as untrusted: always serve it through `wrapGame()` inside the sandboxed iframe.
-- Keep a source link to the PR on every puzzle.
-- Keep the UI accessible: semantic HTML, real buttons/labels, visible focus, reduced-motion support.
-- Generation costs money (Gemini + Lyria). Discuss before adding auto-generation, crawlers, or removing the human-pressed button.
-- The owner does visual QA; agents should test logic (typecheck, lint, API/script runs), not take screenshots.
+- Keep `GEMINI_KEY`, `GITHUB_TOKEN`, `BLOB_READ_WRITE_TOKEN` server-side.
+- Gemini only fills data (`lib/types.ts`). New visuals or mechanics are added as our own components, not generated code.
+- Keep every puzzle about ONE small decision so votes map to concrete cases.
+- Keep a link to the real PR on every puzzle. Only say a PR was made with an AI tool when its own signature says so
+  (`pr.madeWith`, from `madeWithTool`); never guess from style.
+- Generation costs money (Gemini + Lyria + Omni video ≈$0.35). Never backfill cutscenes for older puzzles. Discuss before adding auto-generation or crawlers.
+- The owner does visual QA; agents test logic (typecheck, lint, scripted pipeline runs), not screenshots.
 
 ## Commands
 
@@ -76,11 +130,8 @@ npm run lint
 npm run build
 ```
 
-Copy `.env.example` to `.env.local`. Lyria requires a paid-tier Gemini key; without it puzzles are saved without music.
+## Known gaps
 
-## Known gaps / next steps
-
-- No auth or rate limiting on generation, judgments or verdicts (anyone can trigger paid generation or stuff votes).
-- The request takes ~1.5–2 min (research, design, art, music); the background build adds a few minutes, more if a repair pass runs. Two concurrent pollers could both start a repair (harmless but wasteful).
-- Random PR picks aren't restricted to AI-authored PRs (proposed: provenance signals like "Generated with Claude Code", Copilot/Devin authors).
-- `checkGame()` is a static heuristic (regex), not a play-test; a game can pass and still be confusing.
+- No rate limiting on generation or votes.
+- The truth table is only as faithful as Gemini's Python model of the diff; nothing cross-checks it against the real code.
+- Puzzles where nothing changes behaviour (pure refactors) produce weaker rounds.

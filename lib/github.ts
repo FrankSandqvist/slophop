@@ -1,4 +1,5 @@
 import "server-only";
+import { settleLimited } from "./limit";
 
 export type PullRequestSource = {
   url: string;
@@ -13,40 +14,60 @@ export type PullRequestSource = {
   context: string;
   owner: string;
   repo: string;
+  /** The AI coding tool the PR itself says made it (signature footer, agent author, Codex link), or null. Never guessed. */
+  madeWith: string | null;
   /** Commit the PR's code is read at (merge commit when merged, else head). */
   ref: string;
   changedFiles: string[];
 };
 
-type SearchItem = { html_url: string; user: { login: string }; title: string };
+type SearchItem = { html_url: string; user: { login: string }; title: string; body: string | null; labels?: Array<{ name: string }> };
 type PullFile = { filename: string; status: string; additions: number; deletions: number; patch?: string };
 type Pull = {
   html_url: string;
   title: string;
   body: string | null;
   user: { login: string };
+  labels?: Array<{ name: string }>;
   merged_at: string | null;
   merge_commit_sha: string | null;
   number: number;
   head: { sha: string };
 };
 
+/**
+ * Recent merged public PRs made with AI coding tools, found by each tool's own signature. Search matches loosely, so every
+ * loaded PR is checked again with `madeWithTool` and dropped unless it really carries a signature.
+ */
 const SEARCHES = [
-  "fix in:title is:pr is:public is:merged language:TypeScript",
-  "fix in:title is:pr is:public is:merged language:Python",
-  "fix in:title is:pr is:public is:merged language:JavaScript",
-  "fix in:title is:pr is:public is:merged language:Go",
-  "fix in:title is:pr is:public is:merged language:Rust",
-  "edge case in:title is:pr is:public is:merged",
-  "off by one in:title is:pr is:public is:merged",
-  "validation in:title is:pr is:public is:merged language:TypeScript",
+  'fix in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+  'edge case in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+  'fix in:title author:app/copilot-swe-agent is:pr is:public is:merged',
+  'fix in:title "chatgpt.com/codex/tasks" in:body is:pr is:public is:merged',
+  'fix in:title author:app/devin-ai-integration is:pr is:public is:merged',
+  'fix in:title author:app/google-labs-jules is:pr is:public is:merged',
+  'fix in:title "Made with Cursor" in:body is:pr is:public is:merged',
+  'validation in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
 ];
+
+/** The AI tool a PR says made it, from its own signature only: agent author accounts, footers, Codex task links. */
+export function madeWithTool(pull: { body: string | null; user: { login: string }; labels?: Array<{ name: string }> }): string | null {
+  const login = pull.user.login.toLowerCase();
+  const body = pull.body ?? "";
+  if (login === "copilot" || login.startsWith("copilot-swe-agent")) return "GitHub Copilot";
+  if (login.startsWith("devin-ai-integration")) return "Devin";
+  if (login.startsWith("google-labs-jules")) return "Jules";
+  if (/generated with \[?claude code/i.test(body)) return "Claude Code";
+  if (/chatgpt\.com\/codex\/tasks\//i.test(body)) return "OpenAI Codex";
+  if (/(made|generated) with \[?cursor/i.test(body)) return "Cursor";
+  return null;
+}
 
 const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php|cs|swift|c|cc|cpp|h)$/i;
 const NOISE_FILE = /(lock|\.min\.|snap|generated|dist\/|vendor\/|__snapshots__|\.d\.ts$)/i;
-const MAX_DIFF_CHARS = 18_000;
-const MAX_CONTEXT_CHARS = 24_000;
-const CONTEXT_FILES = 3;
+const MAX_DIFF_CHARS = 9_000;
+const MAX_CONTEXT_CHARS = 6_000;
+const CONTEXT_FILES = 2;
 const CONTEXT_PADDING = 25;
 
 function headers() {
@@ -76,10 +97,6 @@ export function parsePullUrl(input: string) {
   const match = input.trim().match(/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/i);
   if (!match) return null;
   return { owner: match[1], repo: match[2], number: Number(match[3]) };
-}
-
-function pick<T>(items: T[]) {
-  return items[Math.floor(Math.random() * items.length)];
 }
 
 /** Rough "how much branching logic is in here" score, used to prefer puzzle-worthy PRs. */
@@ -176,7 +193,7 @@ async function loadContext({ pull, files, owner, repo }: LoadedPull) {
   return sections.filter(Boolean).join("\n\n");
 }
 
-async function toSource(loaded: LoadedPull): Promise<PullRequestSource> {
+async function toSource(loaded: LoadedPull, withContext = true): Promise<PullRequestSource> {
   const { pull, files, owner, repo } = loaded;
   return {
     url: pull.html_url,
@@ -185,9 +202,10 @@ async function toSource(loaded: LoadedPull): Promise<PullRequestSource> {
     title: pull.title,
     body: (pull.body ?? "").slice(0, 3000),
     author: pull.user.login,
+    madeWith: madeWithTool(pull),
     mergedAt: pull.merged_at,
     diff: buildDiff(files),
-    context: await loadContext(loaded),
+    context: withContext ? await loadContext(loaded) : "",
     owner,
     repo,
     ref: refOf(pull),
@@ -203,114 +221,51 @@ export async function getPullRequest(url: string): Promise<PullRequestSource> {
   return toSource(loaded);
 }
 
-/** Find a random merged public PR with juicy, puzzle-sized logic. */
-export async function findPuzzleWorthyPullRequest(): Promise<PullRequestSource> {
-  for (let round = 0; round < 3; round++) {
-    const page = 1 + Math.floor(Math.random() * 5);
-    const search = await gh<{ items: SearchItem[] }>(
-      `/search/issues?q=${encodeURIComponent(pick(SEARCHES))}&sort=updated&order=desc&per_page=30&page=${page}`,
-    );
-    const humans = search.items.filter(
-      (item) => !/\[bot\]|dependabot|renovate/i.test(item.user.login) && !/^(ci|docs|chore|build|test|style)(\(|:|\s)/i.test(item.title),
-    );
-    const candidates = humans.sort(() => Math.random() - 0.5).slice(0, 4);
-    const loaded = await Promise.all(
-      candidates.map((item) => {
-        const parsed = parsePullUrl(item.html_url);
-        return parsed ? loadPull(parsed.owner, parsed.repo, parsed.number).catch(() => null) : null;
-      }),
-    );
-    const best = loaded.filter((pull): pull is LoadedPull => Boolean(pull && pull.score > 0)).sort((a, b) => b.score - a.score)[0];
-    if (best) return toSource(best);
+/**
+ * Many random merged public PRs with puzzle-sized logic (diffs only, no surrounding code yet), ordered by a quick
+ * branching-logic heuristic. Several searches run in parallel. Use `addContext` on the one you pick.
+ */
+export async function findCandidatePullRequests(count = 50): Promise<PullRequestSource[]> {
+  // Four searches of 100 (the max per page), at most two at a time: GitHub's search API has a burst ("secondary") limit
+  // that parallel searches trip easily.
+  const queries = [...SEARCHES].sort(() => Math.random() - 0.5).slice(0, 4);
+  const searched = await settleLimited(queries, 2, (query) =>
+    gh<{ items: SearchItem[] }>(`/search/issues?q=${encodeURIComponent(query)}&sort=updated&order=desc&per_page=100&page=${1 + Math.floor(Math.random() * 2)}`).then((result) => result.items),
+  );
+  if (searched.every((result) => result.status === "rejected")) {
+    throw new Error("GitHub asked us to slow down for a few minutes. Try again soon, or paste a PR link.");
   }
-  throw new Error("Couldn't find a puzzle-worthy PR this time. Hop again!");
+  const results = searched.map((result) => (result.status === "fulfilled" ? result.value : []));
+  const seen = new Set<string>();
+  const items = results
+    .flat()
+    // Coding agents may post as bots; dependency bots never write logic worth a puzzle.
+    .filter((item) => !/dependabot|renovate|github-actions/i.test(item.user.login) && !/^(ci|docs|chore|build|test|style)(\(|:|\s)/i.test(item.title))
+    // Search results carry the description and author, so unsigned PRs are dropped before costing two API calls each.
+    .filter((item) => madeWithTool(item))
+    .filter((item) => (seen.has(item.html_url) ? false : (seen.add(item.html_url), true)))
+    .sort(() => Math.random() - 0.5)
+    .slice(0, Math.ceil(count * 1.4));
+  if (!items.length) throw new Error("GitHub search came back empty. Try again in a minute.");
+
+  // At most 12 PRs load at once (2 calls each), well under GitHub's limit on simultaneous requests.
+  const loaded = (
+    await settleLimited(items, 12, async (item) => {
+      const parsed = parsePullUrl(item.html_url);
+      return parsed ? loadPull(parsed.owner, parsed.repo, parsed.number) : null;
+    })
+  ).map((result) => (result.status === "fulfilled" ? result.value : null));
+  const best = loaded
+    .filter((pull): pull is LoadedPull => Boolean(pull && pull.score > 0 && madeWithTool(pull.pull)))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, count);
+  if (!best.length) throw new Error("Couldn't find puzzle-worthy PRs this time. Try again!");
+  return Promise.all(best.map((pull) => toSource(pull, false)));
 }
 
-/* ---------- Repo browsing (used as Gemini tools during research) ---------- */
-
-const SKIP_PATH = /(^|\/)(node_modules|vendor|dist|build|target|\.git|\.next|coverage|__pycache__)\/|\.(png|jpe?g|gif|svg|ico|webp|woff2?|ttf|lock|min\.js|map|pdf|zip)$/i;
-const MAX_TREE_PATHS = 350;
-const MAX_READ_LINES = 220;
-
-export type RepoBrowser = ReturnType<typeof createRepoBrowser>;
-
-/** A tiny read-only view of a repo at one commit, with caching, for tool calls. */
-export function createRepoBrowser(source: PullRequestSource) {
-  const { owner, repo, ref } = source;
-  const files = new Map<string, Promise<string>>();
-  let tree: Promise<string[]> | null = null;
-
-  function allPaths() {
-    tree ??= gh<{ tree: Array<{ path: string; type: string }>; truncated: boolean }>(`/repos/${owner}/${repo}/git/trees/${ref}?recursive=1`)
-      .then((data) => data.tree.filter((entry) => entry.type === "blob" && !SKIP_PATH.test(entry.path)).map((entry) => entry.path))
-      .catch(() => []);
-    return tree;
-  }
-
-  function fileText(path: string) {
-    const clean = path.replace(/^\/+/, "");
-    if (!files.has(clean)) {
-      const encoded = clean.split("/").map(encodeURIComponent).join("/");
-      files.set(clean, ghResponse(`/repos/${owner}/${repo}/contents/${encoded}?ref=${ref}`, "application/vnd.github.raw+json").then((response) => response.text()));
-    }
-    return files.get(clean)!;
-  }
-
-  return {
-    /** Repo description, README start and a file list biased towards the changed folders. */
-    async overview() {
-      const [info, readme, paths] = await Promise.all([
-        gh<{ description: string | null; topics?: string[]; language: string | null; homepage: string | null }>(`/repos/${owner}/${repo}`).catch(() => null),
-        ghResponse(`/repos/${owner}/${repo}/readme`, "application/vnd.github.raw+json").then((r) => r.text()).catch(() => ""),
-        allPaths(),
-      ]);
-      const changedDirs = new Set(source.changedFiles.map((file) => file.split("/").slice(0, -1).join("/")));
-      const near = paths.filter((path) => changedDirs.has(path.split("/").slice(0, -1).join("/")));
-      const rest = paths.filter((path) => !near.includes(path));
-      const listed = [...near, ...rest].slice(0, MAX_TREE_PATHS);
-      return [
-        `REPO: ${owner}/${repo}${info?.language ? ` (${info.language})` : ""}`,
-        info?.description ? `DESCRIPTION: ${info.description}` : "",
-        info?.topics?.length ? `TOPICS: ${info.topics.join(", ")}` : "",
-        readme ? `README (start):\n${readme.split("\n").slice(0, 60).join("\n").slice(0, 4000)}` : "",
-        `FILES (${paths.length} total, changed folders first${paths.length > listed.length ? `, first ${listed.length} shown` : ""}):\n${listed.join("\n")}`,
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-    },
-
-    async readFile(path: string, startLine = 1, endLine = startLine + MAX_READ_LINES - 1) {
-      const text = await fileText(path);
-      const lines = text.split("\n");
-      const start = Math.max(1, Math.floor(startLine));
-      const end = Math.min(lines.length, Math.floor(endLine), start + MAX_READ_LINES - 1);
-      const body = lines.slice(start - 1, end).map((line, index) => `${String(start + index).padStart(5)} | ${line}`).join("\n");
-      return `${path} — lines ${start}-${end} of ${lines.length}${end < lines.length ? " (call again with start_line to read more)" : ""}\n${body}`;
-    },
-
-    async listDir(path: string) {
-      const prefix = path.replace(/^\/+|\/+$/g, "");
-      const paths = await allPaths();
-      const children = new Set<string>();
-      for (const file of paths) {
-        if (prefix && !file.startsWith(`${prefix}/`)) continue;
-        const rest = prefix ? file.slice(prefix.length + 1) : file;
-        const [head, ...tail] = rest.split("/");
-        children.add(tail.length ? `${head}/` : head);
-      }
-      return children.size ? [...children].sort().slice(0, 200).join("\n") : `No entries under "${prefix}".`;
-    },
-
-    /** GitHub code search (default branch). Needs GITHUB_TOKEN. */
-    async searchCode(query: string) {
-      const q = encodeURIComponent(`${query} repo:${owner}/${repo}`);
-      const result = await ghResponse(`/search/code?q=${q}&per_page=12`, "application/vnd.github.text-match+json")
-        .then((response) => response.json() as Promise<{ items: Array<{ path: string; text_matches?: Array<{ fragment: string }> }> }>);
-      if (!result.items.length) return `No matches for "${query}".`;
-      return result.items
-        .map((item) => `${item.path}\n${(item.text_matches ?? []).map((match) => `    ${match.fragment.replace(/\n/g, "\n    ")}`).join("\n    ...\n")}`)
-        .join("\n\n")
-        .slice(0, 6000);
-    },
-  };
+/** Loads the code around the changes for a PR fetched without it. */
+export async function addContext(pr: PullRequestSource): Promise<PullRequestSource> {
+  if (pr.context) return pr;
+  const loaded = await loadPull(pr.owner, pr.repo, pr.number);
+  return { ...pr, context: await loadContext(loaded) };
 }

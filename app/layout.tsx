@@ -1,13 +1,12 @@
 import type { Metadata, Viewport } from "next";
-import { STYLE, tokensCss } from "@/lib/style";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "SlopHop — puzzles for humans, reviews for robots",
-  description: "Logic puzzles generated from real pull requests. Crack the puzzle, and you've reviewed the code. No coding required.",
+  title: "SlopHop",
+  description: "Real code changes from the public software around you, as tiny brain teasers. Starring Green (additions) and Red (removals).",
 };
 
-export const viewport: Viewport = { themeColor: STYLE.tokens["--sh-bg"] };
+export const viewport: Viewport = { themeColor: "#ffcf33", width: "device-width", initialScale: 1, viewportFit: "cover" };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
@@ -15,8 +14,8 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-        <link rel="stylesheet" href={STYLE.fontsHref} />
-        <style id="slophop-tokens">{tokensCss()}</style>
+        {/* eslint-disable-next-line @next/next/no-page-custom-font -- App Router root layout: loads for every page */}
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" />
       </head>
       <body>{children}</body>
     </html>

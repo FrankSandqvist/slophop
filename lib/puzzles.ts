@@ -1,366 +1,450 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
-import { offerMechanics, type Mechanic } from "./catalog";
-import { MODELS, generateImage, generateJson, generateMusic, getBackground, startBackground } from "./gemini";
-import { findPuzzleWorthyPullRequest, getPullRequest, type PullRequestSource } from "./github";
-import { researchPullRequest, type Likelihood, type ResearchNotes } from "./research";
-import { ANSWERS, parseQuestionKey, type Tally } from "./review";
-import { listFiles, readFile, readText, saveFile } from "./storage";
-import { STYLE } from "./style";
+import { MODELS, decide, generateJson, generateMusic, generateVideo, type DecisionQuestion } from "./gemini";
+import { addContext, findCandidatePullRequests, getPullRequest, type PullRequestSource } from "./github";
+import { settleLimited } from "./limit";
+import { mascotReferences } from "./sprites";
+import { listFiles, readText, saveFile } from "./storage";
+import { rowKey, type FmvLine, type PropSpec, type Puzzle, type PuzzleInput, type PuzzleOutcome, type PuzzleRow, type Round, type StageCard, type VoteTally } from "./types";
 
-export type { Likelihood } from "./research";
+export type { Puzzle } from "./types";
 
 /** Bump when the puzzle shape changes; older puzzles are hidden. */
-const FORMAT = 5;
-const IMAGES_ENABLED = process.env.IMAGES !== "off";
-/** Thinking levels (Gemini 4: low | medium | high; Hydrogen also xhigh). */
-const DESIGN_THINKING = process.env.GEMINI_DESIGN_THINKING || "medium";
-const BUILD_THINKING = process.env.GEMINI_BUILD_THINKING || "high";
-const BUILD_MAX_TOKENS = Number(process.env.GEMINI_BUILD_MAX_TOKENS || 65_536);
-const MAX_BUILD_ATTEMPTS = 3;
-
-export type PuzzleTheme = {
-  /** 2-4 word name of the game's own art direction. */
-  name: string;
-  /** [background, ink, accent, ...extras] as hex colours. */
-  colors: string[];
-  dimension: "2d" | "3d";
-};
-
-/** One stage of the whole system the data travels through. */
-export type SystemStage = { name: string; emoji: string; role: string; changed: boolean };
-
-export type PuzzleSolved = { situation: string; before: string; after: string; aiView: "works" | "partly" | "no"; aiReason: string };
-export type PuzzleTradeoff = { title: string; gain: string; cost: string; aiView: "worth" | "unsure" | "not"; aiReason: string };
-export type PuzzleCase = {
-  title: string;
-  scenario: string;
-  outcome: string;
-  brokePromise: boolean;
-  origin: "introduced" | "existing";
-  aiLikelihood: Likelihood;
-  aiReason: string;
-};
-
-/** A moment where the game reveals the real diff. Lines are cut from the actual diff on the server. */
-export type CodeSpot = { id: string; caption: string; file: string; lines: string[] };
-type DesignCodeSpot = { id: string; caption: string; file: string; anchor: string };
-
-/** One level of the game. `beat` links it to the standardized judgment asked after it (intro has none). */
-export type Level = {
-  beat: string;
-  title: string;
-  goal: string;
-  setup: string;
-  solution: string;
-  teaches: string;
-  codeSpot: string;
-  peekMoment: string;
-};
-
-export type GameMechanic = { name: string; core: string; twist: string };
-
-type Design = {
-  coreDecision: string;
-  title: string;
-  emoji: string;
-  premise: string;
-  projectSummary: string;
-  changeSummary: string;
-  promise: string;
-  styleName: string;
-  artDirection: string;
-  colors: string[];
-  dimension: "2d" | "3d";
-  system: SystemStage[];
-  switchLabels: { old: string; new: string };
-  solved: PuzzleSolved;
-  tradeoffs: PuzzleTradeoff[];
-  cases: PuzzleCase[];
-  mechanic: GameMechanic;
-  rulesBefore: string[];
-  rules: string[];
-  levels: Level[];
-  codeSpots: DesignCodeSpot[];
-  sprites: Array<{ name: string; look: string }>;
-  coverPrompt: string;
-  verdictQuestion: string;
-  aiSuspicion: string;
-  codeMap: Array<{ inPuzzle: string; inCode: string }>;
-  musicVibe: string;
-};
-
-export type PuzzleDesign = Omit<Design, "codeSpots" | "styleName" | "colors" | "dimension"> & {
-  theme: PuzzleTheme;
-  codeSpots: CodeSpot[];
-};
-
-export type BuildState = {
-  interactionId: string;
-  model: string;
-  attempt: number;
-  kind: "build" | "repair";
-  startedAt: string;
-  problems: string[];
-};
-
-export type Puzzle = PuzzleDesign & {
-  format: number;
-  id: string;
-  createdAt: string;
-  status: "building" | "ready" | "failed";
-  build: BuildState | null;
-  /** File names inside the puzzle folder, or null when generation failed or was off. */
-  musicFile: string | null;
-  assets: { cover: string | null; sprites: string | null };
-  models: { research?: string; design: string; build: string; music: string | null; image: string | null };
-  research: ResearchNotes | null;
-  source: Pick<PullRequestSource, "url" | "repository" | "number" | "title" | "author" | "mergedAt">;
-};
-
-export type VerdictTally = { holds: number; breaks: number };
-export type Verdict = "holds" | "breaks";
-export type JudgmentTally = Tally;
+const FORMAT = 6;
+const MAX_ROWS = 48;
+export const BPM = 96;
+/** How many AI-made PRs to fetch and rank per new puzzle. */
+const CANDIDATES = 50;
 
 export type ProgressEvent =
-  | { type: "stage"; stage: "source" | "research" | "design" | "build" | "art" | "music" | "save"; status: "active" | "done" | "skipped"; detail?: string }
+  | {
+      type: "stage";
+      stage: "fetch" | "rank" | "pick" | "model" | "music" | "fmv" | "save";
+      status: "active" | "done" | "skipped";
+      detail?: string;
+      /** rank/done: the top-ranked candidate PRs, best first. */
+      cards?: StageCard[];
+      /** pick/done: index of the chosen PR, and the piece of logic. */
+      pick?: number;
+      component?: string;
+      /** music/active: the generated stage props. */
+      props?: PropSpec[];
+    }
   | { type: "done"; puzzle: Puzzle }
   | { type: "error"; message: string };
 
 const ID_PATTERN = /^[a-z0-9]{6,12}-[a-f0-9]{6}$/;
+export const isPuzzleId = (id: string) => ID_PATTERN.test(id);
 
-export function isPuzzleId(id: string) {
-  return ID_PATTERN.test(id);
-}
+/* ---------- Step 1: rank the candidates with the Gemini Decisions API ---------- */
 
-/* ---------- Design ---------- */
-
-const short = (description: string) => ({ type: "string", description });
-const views = (values: string[], description: string) => ({ type: "string", enum: values, description });
-
-const designSchema = {
-  type: "object",
-  properties: {
-    coreDecision: short("Hidden, for reviewers. The ONE decision you distilled, as 2-6 lines of plain pseudo-rules naming the real identifiers. Write this first."),
-    title: short("Game name, 2-4 words. Witty, not childish."),
-    emoji: short("One emoji."),
-    premise: short("Card teaser, max 12 words."),
-    projectSummary: short("Briefing: what the project is and who uses it, one plain sentence, max 18 words."),
-    changeSummary: short("Briefing: what this change does and why, one plain sentence, max 20 words."),
-    promise: short("What should always be true after this change, max 10 words."),
-    styleName: short("2-4 word name for this game's own art direction."),
-    artDirection: short("This game's own art direction: palette, shapes, materials, type, motion. Specific, original, clean. Max 60 words."),
-    colors: { type: "array", items: short("Hex colour like #1a2b3c"), minItems: 3, maxItems: 5, description: "[background, ink, accent, ...extras]" },
-    dimension: views(["2d", "3d"], "3d only if depth makes the logic clearer."),
-    system: {
-      type: "array",
-      minItems: 3,
-      maxItems: 5,
-      description: "The WHOLE system as a chain the data travels through, start to where a person sees the result. Mark the changed stage(s).",
-      items: {
-        type: "object",
-        properties: { name: short("Max 3 words."), emoji: short("One emoji."), role: short("Max 8 words."), changed: { type: "boolean" } },
-        required: ["name", "emoji", "role", "changed"],
-      },
-    },
-    switchLabels: {
-      type: "object",
-      description: "World words for the old vs new version of the changed part.",
-      properties: { old: short("Max 3 words."), new: short("Max 3 words.") },
-      required: ["old", "new"],
-    },
-    solved: {
-      type: "object",
-      properties: {
-        situation: short("What the change fixes or adds, max 14 words."),
-        before: short("Old behaviour, max 12 words."),
-        after: short("New behaviour, max 12 words."),
-        aiView: views(["works", "partly", "no"], "Your honest view: does the fix work for this situation and close variants?"),
-        aiReason: short("Why, max 20 words."),
-      },
-      required: ["situation", "before", "after", "aiView", "aiReason"],
-    },
-    tradeoffs: {
-      type: "array",
-      minItems: 0,
-      maxItems: 1,
-      description: "0-1 real tradeoff a player can FEEL by playing.",
-      items: {
-        type: "object",
-        properties: {
-          title: short("Max 6 words."),
-          gain: short("What gets better, max 12 words."),
-          cost: short("What gets worse, max 12 words."),
-          aiView: views(["worth", "unsure", "not"], "Your honest view."),
-          aiReason: short("Why, max 20 words."),
-        },
-        required: ["title", "gain", "cost", "aiView", "aiReason"],
-      },
-    },
-    cases: {
-      type: "array",
-      minItems: 1,
-      maxItems: 2,
-      description: "1-2 tricky situations from the research, realistic in the WHOLE system. Prefer ones the change introduced; include one that breaks the promise if the code really has a weak spot.",
-      items: {
-        type: "object",
-        properties: {
-          title: short("Max 6 words."),
-          scenario: short("The real-life situation, max 20 words."),
-          outcome: short("What the system does then, max 14 words."),
-          brokePromise: { type: "boolean" },
-          origin: views(["introduced", "existing"], "Introduced/exposed by this change, or already there."),
-          aiLikelihood: views(["likely", "rare", "never"], "Your honest estimate of how often this happens in real use."),
-          aiReason: short("Why, max 20 words."),
-        },
-        required: ["title", "scenario", "outcome", "brokePromise", "origin", "aiLikelihood", "aiReason"],
-      },
-    },
-    mechanic: {
-      type: "object",
-      description: "The ONE core mechanic the whole game is built on.",
-      properties: {
-        name: short("Max 4 words."),
-        core: short("What the player physically does, and how the game responds. Max 40 words."),
-        twist: short("What makes it this game's own, and how it embodies the code's logic. Max 25 words."),
-      },
-      required: ["name", "core", "twist"],
-    },
-    rulesBefore: { type: "array", items: short("Max 14 words."), minItems: 1, maxItems: 3, description: "How the changed part behaved BEFORE the change." },
-    rules: { type: "array", items: short("Max 14 words."), minItems: 1, maxItems: 4, description: "How it behaves AFTER the change, quirks included." },
-    levels: {
-      type: "array",
-      minItems: 4,
-      maxItems: 6,
-      description:
-        'The level progression, in order: optional "intro" (teaches the mechanic, not judged), "fix", "tradeoff-0" (if a tradeoff), "case-0", "case-1" (one per case), and "hunt" last. Each level deepens the same mechanic with one new wrinkle.',
-      items: {
-        type: "object",
-        properties: {
-          beat: views(["intro", "fix", "tradeoff-0", "case-0", "case-1", "hunt"], "Which standardized moment this level is."),
-          title: short("Level name, max 4 words."),
-          goal: short("What to make happen, max 10 words."),
-          setup: short("The starting state of the board: which objects, where, in what state. Max 40 words."),
-          solution: short("The intended solution, so the level is a real puzzle with an answer. Max 30 words. (The hunt: a known way to break it.)"),
-          teaches: short("What the player learns about the logic, max 12 words."),
-          codeSpot: short("id of the code spot to reveal in this level, or empty."),
-          peekMoment: short("The exact moment to reveal the code, max 12 words."),
-        },
-        required: ["beat", "title", "goal", "setup", "solution", "teaches", "codeSpot", "peekMoment"],
-      },
-    },
-    codeSpots: {
-      type: "array",
-      minItems: 2,
-      maxItems: 4,
-      description: "2-4 moments where peeking at the real changed code links 'this line' to 'what you just saw'.",
-      items: {
-        type: "object",
-        properties: {
-          id: short("Short slug."),
-          caption: short("Plain caption: what this code does, in the world's words. Max 16 words."),
-          file: short("The file path exactly as in the DIFF header."),
-          anchor: short("A distinctive piece of ONE added or removed line in the DIFF, copied character for character (10-60 chars)."),
-        },
-        required: ["id", "caption", "file", "anchor"],
-      },
-    },
-    sprites: {
-      type: "array",
-      minItems: 4,
-      maxItems: 4,
-      description: "Exactly 4 key objects of the game, drawn as one 2x2 sprite sheet in its art direction.",
-      items: { type: "object", properties: { name: short("Max 3 words."), look: short("What it looks like, max 15 words.") }, required: ["name", "look"] },
-    },
-    coverPrompt: short("A cover illustration in the game's art direction (no text, no letters), max 40 words."),
-    verdictQuestion: short("Question for the final free hunt, max 12 words."),
-    aiSuspicion: short("Hidden. Your honest guess at the weakest spot, 1-2 sentences, may use code terms."),
-    codeMap: {
-      type: "array",
-      maxItems: 6,
-      items: { type: "object", properties: { inPuzzle: { type: "string" }, inCode: { type: "string" } }, required: ["inPuzzle", "inCode"] },
-      description: "Hidden decoder: game element -> identifier in the code.",
-    },
-    musicVibe: short("6-10 words: instruments and mood that fit the game. Calm enough to think."),
+/** Calibrated questions asked about every candidate PR (one fast Decisions call each, in parallel). */
+const RANK_QUESTIONS: Record<string, DecisionQuestion> = {
+  logic: {
+    type: "score",
+    instructions:
+      "This is a GitHub pull request. How much clear decision logic does it change that a curious non-coder could reason about: conditions, limits, thresholds, edge cases, what happens when?",
+    criteria: ["None: docs, styling, renames, config or dependency bumps", "A little logic", "Some clear decisions", "A crisp decision with interesting edge cases"],
   },
-  required: [
-    "coreDecision", "title", "emoji", "premise", "projectSummary", "changeSummary", "promise", "styleName", "artDirection", "colors",
-    "dimension", "system", "switchLabels", "solved", "tradeoffs", "cases", "mechanic", "rulesBefore", "rules", "levels", "codeSpots",
-    "sprites", "coverPrompt", "verdictQuestion", "aiSuspicion", "codeMap", "musicVibe",
-  ],
+  small: {
+    type: "score",
+    instructions: "Can ONE small, self-contained decision from this change be understood and explained without knowing the rest of the codebase?",
+    criteria: ["No, it is tangled across many parts", "Only with a lot of background", "Mostly", "Yes, one tidy decision"],
+  },
+  relatable: {
+    type: "score",
+    instructions: "Would the people who use this software notice or care about the behaviour this change affects?",
+    criteria: ["Invisible to users", "Only maintainers would notice", "Some users would notice", "Many users would notice"],
+  },
+  plain: { type: "noul", instructions: "Could the changed behaviour be explained in everyday language, with no programming jargon, in two sentences?" },
+  noise: { type: "noul", instructions: "Is this change mostly noise: only tests, formatting, generated files, version bumps or comments?" },
 };
 
-function researchSection(notes: ResearchNotes | null, fallback: string, pr: PullRequestSource) {
-  if (!notes) return `RESEARCH (incomplete; raw findings):\n${fallback || "(none)"}\n\nEXCERPTS AROUND THE CHANGES:\n${pr.context || "(unavailable)"}`;
-  return `RESEARCH NOTES (from browsing the repo)
-Project: ${notes.project}
-Change: ${notes.change}
-Fixed: ${notes.fixed?.situation} | before: ${notes.fixed?.before} | after: ${notes.fixed?.after}
-Tradeoffs: ${(notes.tradeoffs ?? []).join(" | ") || "(none noted)"}
-Flow: ${notes.flow}
-Edge cases:
-${notes.edgeCases
-  .map((edge) => `- ${edge.input}\n  real trigger: ${edge.realTrigger}\n  result: ${edge.whatHappens}\n  ${edge.introduced ? "introduced by this PR" : "already existed"}; likelihood: ${edge.likelihood} [${edge.evidence}]`)
-  .join("\n")}
-Theme hint: ${notes.themeHint}
-
-KEY CODE:
-${notes.keyCode}`;
+/** 0..1: how good a SlopHop puzzle this PR would make. Null when the Decisions call failed. */
+async function rankScore(pr: PullRequestSource, signal?: AbortSignal) {
+  const input = `${pr.repository}#${pr.number}: ${pr.title}\n\n${pr.body.slice(0, 800)}\n\nDIFF:\n${pr.diff.slice(0, 6000)}`;
+  const answers = await decide(input, RANK_QUESTIONS, signal);
+  const level = (key: string) => {
+    const answer = answers[key];
+    return answer?.type === "score" ? answer.score / 3 : 0;
+  };
+  const yes = (key: string) => {
+    const answer = answers[key];
+    return answer?.type === "noul" ? answer.noul : 0;
+  };
+  return Math.max(0, 0.35 * level("logic") + 0.25 * level("small") + 0.25 * level("relatable") + 0.15 * yes("plain") - 0.4 * yes("noise"));
 }
 
-function designPrompt(pr: PullRequestSource, research: string, mechanics: Mechanic[], recent: Puzzle[]) {
-  return `You are the lead designer of SlopHop. Each SlopHop puzzle is ONE carefully designed puzzle game (think the craft of Brilliant.org,
-the clarity of Brain Age, the wit of WarioWare, the depth of a great indie puzzle game) that lets smart adults who don't code see, test
-and judge a real code change, so a human can feel safe (or rightly unsafe) merging a possibly AI-written pull request.
+/** Scores every candidate in parallel and returns them best first (falls back to the GitHub heuristic order). */
+async function rankCandidates(candidates: PullRequestSource[], signal?: AbortSignal) {
+  if (candidates.length === 1) return [{ pr: candidates[0], score: null as number | null }];
+  // At most 10 Decisions calls at once, so 50 candidates don't trip Gemini's request rate limit.
+  const scores = await settleLimited(candidates, 10, (pr) => rankScore(pr, signal));
+  const ranked = candidates.map((pr, index) => {
+    const result = scores[index];
+    return { pr, score: result.status === "fulfilled" ? result.value : null, order: index };
+  });
+  if (ranked.every((entry) => entry.score === null)) {
+    console.error("Gemini Decisions ranking failed; using the heuristic order", scores.find((result) => result.status === "rejected"));
+    return ranked;
+  }
+  return ranked.sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || a.order - b.order);
+}
 
-THE GAME
-- ONE core mechanic, explored across 4-6 levels. Each level adds one new wrinkle; nothing is thrown away. By the end, the player
-  genuinely understands how the change behaves in the whole system.
-- Every level is a real puzzle with an intended solution, never a quiz. The player solves it by manipulating the world.
-- Calm and unhurried: no timers, no countdowns, no failure screens. Gentle hints when someone is stuck. Let people think.
-- Fun and witty for grown-ups. Never banal, never childish.
+/* ---------- Flair: Gemini designs the stage props and the music's project-specific part ---------- */
 
-STANDARDIZED MOMENTS (the host app asks these questions after the level that sets them up)
-- "fix": the player flips between old and new behaviour (switchLabels) and sees what the change fixed. Then: did it fix it?
-- "tradeoff-0" (optional): the player feels both sides. Then: is the give-and-take worth it?
-- "case-N": the player DISCOVERS a tricky situation by building it. Then: could this really happen?
-- "hunt" (last): a sandbox of the same mechanic. Can the player find another way to break the promise?
-- "intro" (optional, first): teaches the mechanic, no question.
+const num3 = { type: "array", items: { type: "number" }, minItems: 3, maxItems: 3 };
+const flairSchema = {
+  type: "object",
+  properties: {
+    music: {
+      type: "string",
+      description:
+        "One or two sentences that make the SlopHop beat about THIS project: a lead instrument and themed sound effects that evoke its world (e.g. for a phone app: a ringing-bell synth lead over dial-tone blips). Max 40 words. Instrumental only.",
+    },
+    bpm: {
+      type: "integer",
+      description:
+        "The beat's tempo in BPM, 76-132, chosen to fit this project's world while staying a bouncy hip hop groove: laid-back for calm or careful things (e.g. notes, docs, finance ~80-90), mid for everyday apps (~96-105), driving for fast, realtime or playful things (e.g. games, networking, media ~110-128).",
+    },
+    fmv: {
+      type: "array",
+      minItems: 3,
+      maxItems: 4,
+      description:
+        "A 15-second cutscene that shortly explains what this pull request changes, in 3-4 beats. Green does the NEW behaviour, Red the OLD one.",
+      items: {
+        type: "object",
+        properties: {
+          at: { type: "number", description: "Second the beat starts: the first at 0, then about every 3.5-5 seconds, the last by 11." },
+          who: { type: "string", enum: ["narrator", "add", "del"], description: "Who says the line: narrator, add (Green) or del (Red)." },
+          line: {
+            type: "string",
+            description: "One short spoken line in plain words a non-coder gets (no code terms), max 90 characters. Together the lines say what changed and why it matters.",
+          },
+          scene: {
+            type: "string",
+            description:
+              "What we SEE during this beat, max 35 words: Green and Red acting the change out in the project's world as a visual metaphor. Concrete action and camera. They are heads on one stick leg with NO arms or hands: they act by hopping, bouncing, head-butting and nudging things with their heads, never grabbing, holding or pointing. No text, signs, labels or screens with words.",
+          },
+        },
+        required: ["at", "who", "line", "scene"],
+      },
+    },
+    props: {
+      type: "array",
+      minItems: 2,
+      maxItems: 2,
+      description: "Two small, instantly recognisable objects from this project's world, to stand next to the mascots on a PS1-style stage.",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Max 4 words." },
+          parts: {
+            type: "array",
+            minItems: 2,
+            maxItems: 12,
+            description: "Low-poly primitives. Units: the whole prop fits in a 1x1x1 box, base on y=0, centred on x=0,z=0; front faces +z.",
+            items: {
+              type: "object",
+              properties: {
+                shape: { type: "string", enum: ["box", "cylinder", "sphere", "cone", "torus"] },
+                color: { type: "string", description: "Bright, saturated hex colour like #ffd447." },
+                position: { ...num3, description: "Centre of the part [x, y, z]." },
+                size: { ...num3, description: "box: [width, height, depth]; cylinder/cone: [radius, height, 0]; sphere: [radius, 0, 0]; torus: [radius, tube, 0]." },
+                rotation: { ...num3, description: "Radians [x, y, z]." },
+              },
+              required: ["shape", "color", "position", "size", "rotation"],
+            },
+          },
+        },
+        required: ["name", "parts"],
+      },
+    },
+  },
+  required: ["music", "bpm", "fmv", "props"],
+};
 
-METHOD
-1. The system: trace where the data starts, every stage it passes, where a person finally sees the result. Mark the changed stage.
-2. The promise: the ONE thing the change guarantees that matters most.
-3. The mechanic: find the interaction that best EMBODIES this logic. Ideas below for inspiration; pick one, combine, or invent better.
-4. Levels: design each board (setup) and its intended solution. Make sure each is solvable and teaches one thing.
-5. Code spots: 2-4 moments where a peek at the real changed code links "this line" to "what you just saw". Anchors copied exactly from the DIFF.
-6. Art direction: invent this game's own look. Clean and confident, but specific and surprising: palette, materials, type, motion.
-   It must be clearly different from these recent games: ${recent.map((puzzle) => `"${puzzle.theme.name}"`).join(", ") || "(none yet)"}.
-7. Art assets: 4 sprites (key objects) and a cover illustration in that art direction.
-8. Honest views (fix, tradeoff, likelihoods): hidden until players answer, then compared with the crowd.
+type FmvBeat = { at: number; who: FmvLine["who"]; line: string; scene: string };
+type Flair = { music: string; bpm: number; props: PropSpec[]; fmv: FmvBeat[] };
 
-RULES
-- Faithful: the game behaves like the code (before and after), bugs and quirks included. Do not fix it.
-- Players see EVERY field except coreDecision, aiSuspicion, aiReason, codeMap, the levels' solutions, and codeSpots' file/anchor.
-  All player-facing fields follow PLAIN LANGUAGE. Translate, don't simplify away: e.g. "SF_25" -> "the 25th rune".
+const FMV_SECONDS = 15;
 
-PLAIN LANGUAGE
-${STYLE.plainLanguage}
+/** Beats in order, starting at 0, at least 2.5s apart, the last starting by 12s. */
+function cleanFmv(beats: FmvBeat[] | undefined): FmvBeat[] {
+  const who = ["narrator", "add", "del"];
+  const clean: FmvBeat[] = [];
+  for (const beat of [...(beats ?? [])].sort((a, b) => Number(a?.at) - Number(b?.at)).slice(0, 4)) {
+    const line = String(beat?.line ?? "").trim().slice(0, 110);
+    const scene = String(beat?.scene ?? "").trim().slice(0, 300);
+    if (!line || !scene) continue;
+    const at = clean.length ? Math.max(clean[clean.length - 1].at + 2.5, clamp(beat.at, 0, 12, 0)) : 0;
+    if (at > 12) break;
+    clean.push({ at: Math.round(at * 10) / 10, who: who.includes(beat.who) ? beat.who : "narrator", line, scene });
+  }
+  return clean;
+}
 
-MECHANIC IDEAS (inspiration only)
-${mechanics.map((mechanic) => `- ${mechanic.name}: ${mechanic.how} Good for ${mechanic.goodFor}.`).join("\n")}
+/**
+ * The cutscene prompt: the mascots as in the reference images, the fixed PS1 FMV look, and the beats with timecodes so
+ * the picture matches the dialogue shown in the text box.
+ */
+function fmvPrompt(pr: PullRequestSource, beats: FmvBeat[]) {
+  const timeline = beats.map((beat, index) => `[${beat.at}-${beats[index + 1]?.at ?? FMV_SECONDS}s] ${beat.scene}`).join(" ");
+  return [
+    "A 15-second cutscene, like the pre-rendered FMV intro of a 1998 PlayStation game.",
+    "Characters, exactly as in the reference images: GREEN is a round light-green pixel-art head with a dark green outline,",
+    "two black dot eyes and a wide grin, on one long thin wobbly black leg. RED is the same character in light red with a dark",
+    "red outline. Their whole body is just that: a head on ONE thin black stick leg. They have NO arms, NO hands, NO torso,",
+    "NO second leg and NO feet or shoes, at every moment of the clip; never add limbs or clothes. They move only by hopping,",
+    "bouncing and bending on their single leg, tilting and spinning their heads, and pushing or nudging things with their heads.",
+    "They stay flat, chunky pixel sprites moving through a 3D world, like paper cut-outs.",
+    `Setting: the world of the software project "${pr.repository.split("/")[1] ?? pr.repository}".`,
+    "Look: low-poly 3D sets, chunky low-resolution textures, warm saturated colours, slight dithering, soft Gouraud lighting,",
+    "smooth simple camera moves, one continuous scene with no cuts.",
+    `Timeline: ${timeline}`,
+    "No text anywhere: no letters, words, numbers, captions, subtitles, signs, labels, logos or interface. No dialogue or voices,",
+    "only light playful ambient sound.",
+  ].join(" ");
+}
 
-PULL REQUEST: ${pr.repository}#${pr.number}: ${pr.title}
+const clamp = (value: unknown, min: number, max: number, fallback: number) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+};
+const vec = (value: unknown, min: number, max: number, fallback: number): [number, number, number] => {
+  const list = Array.isArray(value) ? value : [];
+  return [clamp(list[0], min, max, fallback), clamp(list[1], min, max, fallback), clamp(list[2], min, max, fallback)];
+};
+
+/** Keeps generated props small, valid and on-style. */
+function cleanProps(props: PropSpec[] | undefined): PropSpec[] {
+  const shapes = ["box", "cylinder", "sphere", "cone", "torus"];
+  return (props ?? []).slice(0, 2).map((prop) => ({
+    name: String(prop?.name ?? "").slice(0, 40),
+    parts: (prop?.parts ?? [])
+      .slice(0, 12)
+      .filter((part) => shapes.includes(part?.shape))
+      .map((part) => ({
+        shape: part.shape,
+        color: /^#[0-9a-f]{6}$/i.test(part.color) ? part.color : "#ffd447",
+        position: vec(part.position, -0.8, 1.4, 0),
+        size: vec(part.size, 0.02, 1.2, 0.2),
+        rotation: vec(part.rotation, -Math.PI * 2, Math.PI * 2, 0),
+      })),
+  }));
+}
+
+/** One quick call: the project's props and the project-specific line of the music prompt. */
+async function designFlair(pr: PullRequestSource, signal?: AbortSignal): Promise<Flair> {
+  const { data } = await generateJson<Flair>({
+    model: MODELS.backup,
+    prompt: `SlopHop turns real pull requests into tiny brain teasers. Its stage is a 90s PlayStation-style low-poly set where two mascots
+(Green, the added code, and Red, the removed code) dance to a funky lo-fi hip hop rhythm-game beat.
+
+For the project below:
+1. Write the music line: what makes the beat about THIS project (a lead instrument and themed sound effects that evoke its world),
+   and pick the tempo that suits it.
+2. Write the 15-second cutscene that shortly explains what this pull request changes (read the diff), as 3-4 beats: the line
+   someone says and what we see, with Green and Red acting it out in the project's world.
+3. Design two small props from this project's world to stand next to the mascots, built from a few chunky low-poly primitives,
+   bold and readable at tiny resolution (think PS1 / Nintendo DS). Keep each prop simple: 3-10 parts, bright colours,
+   but no green or red: those colours only ever mean the two mascots.
+
+PROJECT: ${pr.repository}
+PULL REQUEST: ${pr.title}
+${pr.body.slice(0, 700)}
+
+DIFF (excerpt):
+${pr.diff.slice(0, 4000)}`,
+    schema: flairSchema,
+    thinking: "low",
+    signal,
+  });
+  return { music: String(data.music ?? "").slice(0, 300), fmv: cleanFmv(data.fmv), bpm: Math.round(clamp(data.bpm, 76, 132, BPM)), props: cleanProps(data.props) };
+}
+
+/** Project line first (LLM-written), then the fixed SlopHop groove so every beat keeps the same vibe. */
+async function composeMusic(pr: PullRequestSource, style: string, bpm: number, signal?: AbortSignal) {
+  const project = pr.repository.split("/")[1]?.replace(/[-_]+/g, " ") ?? "";
+  return generateMusic({
+    prompt: [
+      `Instrumental only, no vocals. A theme tune for "${project}". ${style}`,
+      "Make that lead and those sounds front and centre for the whole loop.",
+      `Groove: a 90s PlayStation rhythm-game beat, funky, bouncy lo-fi hip hop with plucky bass and crisp drums.`,
+      `Tempo: exactly ${bpm} BPM, steady from the first beat to the last.`,
+      "Made to loop seamlessly: start right on the groove at full energy from the very first beat (no intro, no build-up, no count-in),",
+      "keep the same groove and energy to the very last beat (no fade-out, no ending, no final hit), so the end flows straight back into the start.",
+    ].join(" "),
+    signal,
+  });
+}
+
+/* ---------- Step 2: model that piece as a truth table (code execution) ---------- */
+
+const str = (description: string) => ({ type: "string", description });
+const slug = "Short lowercase slug, letters/digits/dashes.";
+
+const schema = {
+  type: "object",
+  properties: {
+    title: str("Puzzle title, 2-5 words, witty."),
+    project: str("What the project is and who it affects, plain words, max 20 words."),
+    change: str("What this PR changes, plain words, max 25 words."),
+    where: str("Where this code lives, as a player would see it: which app/tool and which screen, button or moment. Plain words, max 22 words."),
+    scenario: str("Set the scene in second person: who you are, what you're doing, and the moment this decision happens. Plain, vivid, max 40 words."),
+    rules: {
+      type: "object",
+      description: "Plain-language rulebooks a player can apply to work out EVERY row of your table. Must match the table exactly.",
+      properties: {
+        old: { type: "array", minItems: 1, maxItems: 4, items: str("One of Red's rules (BEFORE the change), max 16 words, plain, 'If..., then...' style."), description: "Red's rulebook." },
+        new: { type: "array", minItems: 1, maxItems: 4, items: str("One of Green's rules (AFTER the change), max 16 words, plain, 'If..., then...' style."), description: "Green's rulebook." },
+      },
+      required: ["old", "new"],
+    },
+    component: {
+      type: "object",
+      properties: {
+        name: str("The small piece of logic, in plain words, max 5 words."),
+        what: str("What it decides, plain words, max 20 words."),
+        file: str("File path from the diff."),
+      },
+      required: ["name", "what", "file"],
+    },
+    lines: {
+      type: "object",
+      properties: {
+        add: str("Green (the added code) introduces itself in first person: what it does now. Rhythmic, witty, max 14 words."),
+        del: str("Red (the removed code) in first person: what it used to do. Rhythmic, witty, max 14 words."),
+      },
+      required: ["add", "del"],
+    },
+    inputs: {
+      type: "array",
+      minItems: 1,
+      maxItems: 3,
+      items: {
+        type: "object",
+        properties: {
+          id: str(slug),
+          label: str("Plain name, max 4 words."),
+          explain: str("What this condition means in the scene, plain words, max 16 words."),
+          kind: {
+            type: "string",
+            enum: ["toggle", "scale", "choice"],
+            description: "toggle = exactly 2 values (on/off, yes/no). scale = ordered values listed low to high (sizes, counts, times, limits). choice = unordered categories.",
+          },
+          values: {
+            type: "array",
+            minItems: 2,
+            maxItems: 4,
+            items: {
+              type: "object",
+              properties: {
+                id: str(slug),
+                label: str("Plain value, max 4 words."),
+                story: str("This value as a short phrase in the scene, second person, max 8 words, e.g. 'your mouse drifted off the card'."),
+              },
+              required: ["id", "label", "story"],
+            },
+          },
+        },
+        required: ["id", "label", "explain", "kind", "values"],
+      },
+    },
+    outcomes: {
+      type: "array",
+      minItems: 2,
+      maxItems: 5,
+      items: {
+        type: "object",
+        properties: {
+          id: str(slug),
+          label: str("What happens, plain words, max 6 words."),
+          tone: { type: "string", enum: ["good", "bad", "neutral"], description: "How a user would feel about it." },
+        },
+        required: ["id", "label", "tone"],
+      },
+    },
+    table: {
+      type: "array",
+      description: "EVERY combination of input values (cartesian product), with the outcome before and after the change, computed by running your Python model.",
+      items: {
+        type: "object",
+        properties: {
+          values: { type: "array", items: str("A value id, one per input, in input order.") },
+          old: str("Outcome id before the change (Red)."),
+          new: str("Outcome id after the change (Green)."),
+        },
+        required: ["values", "old", "new"],
+      },
+    },
+    codeAnchor: str("A distinctive piece of ONE added or removed line of the chosen component in the DIFF, copied exactly (10-60 chars)."),
+  },
+  required: ["title", "project", "change", "where", "scenario", "rules", "component", "lines", "inputs", "outcomes", "table", "codeAnchor"],
+};
+
+type Design = {
+  title: string;
+  project: string;
+  change: string;
+  where: string;
+  scenario: string;
+  rules: { old: string[]; new: string[] };
+  component: { name: string; what: string; file: string };
+  lines: { add: string; del: string };
+  inputs: PuzzleInput[];
+  outcomes: PuzzleOutcome[];
+  table: Array<{ values: string[]; old: string; new: string }>;
+  codeAnchor: string;
+};
+
+const FOCUS = "Choose it yourself: the SMALLEST meaningful piece of logic this PR changes (one decision, one function, one condition).";
+
+function modelPrompt(pr: PullRequestSource, focus: string) {
+  return `You design SlopHop puzzles. SlopHop shows curious people what is changing in the public software around them, as a tiny brain teaser.
+Two characters star in every puzzle: GREEN is the code this pull request ADDED, RED is the code it REMOVED.
+
+THE PIECE OF LOGIC TO MODEL: ${focus}
+
+YOUR JOB
+1. Model that one decision as 1-3 inputs with 2-4 plain values each (include the edge values: empty, zero, too many, odd formats...)
+   and 2-5 plain outcomes. Keep the full table at ${MAX_ROWS} rows or fewer.
+2. Use code execution: write two small Python functions, old(...) and new(...), that faithfully mirror the code BEFORE and AFTER this PR
+   for your abstract inputs (bugs and quirks included; do not fix anything). If the logic didn't exist before, old() returns the closest
+   outcome to "nothing happens". Run them over every combination and fill "table" from the printed results.
+   Be quick: write the code once, run it once, then answer. Only re-run if it errors.
+   Pick each input's kind so it gets the right control: a yes/no condition is a "toggle", a limit/size/count/time is a "scale"
+   (values in order, include the boundary on both sides), anything else is a "choice".
+3. Write the two rulebooks: Red's rules (before) and Green's rules (after), short plain "If..., then..." lines that let a player
+   work out EVERY row of your table by reasoning. Check them against the table; puzzles are only fair if the rules are complete.
+4. Set the scene so a curious non-coder knows exactly where they are: "where" (which app, which screen or moment) and "scenario"
+   (second person: you're doing X when Y happens). Explain every input, and give every value a short story phrase in that scene.
+5. Write everything players see in plain language: no code, identifiers, symbols or jargon. Clear and witty for grown-ups; never childish.
+
+The game is generated from your table by our own code. Make the table right.
+
+=== PULL REQUEST: ${pr.repository}#${pr.number}: ${pr.title}
 DESCRIPTION:
-${pr.body || "(none)"}
-
-${research}
-
+${pr.body.slice(0, 1500) || "(none)"}
 DIFF:
-${pr.diff}`;
+${pr.diff}
+CODE AROUND THE CHANGES:
+${pr.context || "(unavailable)"}`;
 }
 
-/** Cut each code spot's lines out of the real diff, so popups never show invented code. */
-function resolveCodeSpots(spots: DesignCodeSpot[], diff: string): CodeSpot[] {
+const SLUG = /^[a-z0-9][a-z0-9-]{0,40}$/;
+
+function cleanId(value: string, fallback: string) {
+  const id = String(value ?? "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  return SLUG.test(id) ? id : fallback;
+}
+
+/** Cut the component's lines out of the real diff, so players see real code, never invented code. */
+function resolveCode(anchor: string, diff: string): Puzzle["code"] {
+  const norm = (text: string) => text.replace(/\s+/g, " ").trim();
+  const wanted = norm(anchor ?? "");
+  if (wanted.length < 4) return null;
   const blocks = diff
     .split(/^--- (?=\S[^\n]* \((?:added|removed|modified|renamed|changed|copied|unchanged)[,)])/m)
     .filter(Boolean)
@@ -368,731 +452,421 @@ function resolveCodeSpots(spots: DesignCodeSpot[], diff: string): CodeSpot[] {
       const [header, ...lines] = block.split("\n");
       return { file: header.replace(/ \([^)]*\)\s*$/, "").trim(), lines };
     });
-  const norm = (text: string) => text.replace(/\s+/g, " ").trim();
-  const seen = new Set<string>();
-  const resolved: CodeSpot[] = [];
-  for (const spot of spots ?? []) {
-    const anchor = norm(spot.anchor ?? "");
-    if (anchor.length < 4 || !spot.id || seen.has(spot.id)) continue;
-    const sameFile = blocks.filter((block) => block.file === spot.file || block.file.endsWith(spot.file) || spot.file.endsWith(block.file));
-    for (const block of [...sameFile, ...blocks]) {
-      const at = block.lines.findIndex((line) => /^[+-]/.test(line) && norm(line.slice(1)).includes(anchor));
-      if (at < 0) continue;
-      let start = at;
-      let end = at;
-      while (start > 0 && at - start < 4 && !block.lines[start - 1].startsWith("@@")) start--;
-      while (end < block.lines.length - 1 && end - at < 6 && block.lines[end + 1] !== "" && !block.lines[end + 1].startsWith("@@")) end++;
-      resolved.push({ id: spot.id, caption: spot.caption, file: block.file, lines: block.lines.slice(start, end + 1).map((line) => line.slice(0, 140)) });
-      seen.add(spot.id);
-      break;
+  for (const block of blocks) {
+    const at = block.lines.findIndex((line) => /^[+-]/.test(line) && norm(line.slice(1)).includes(wanted));
+    if (at < 0) continue;
+    let start = at;
+    let end = at;
+    while (start > 0 && at - start < 5 && !block.lines[start - 1].startsWith("@@")) start--;
+    while (end < block.lines.length - 1 && end - at < 7 && block.lines[end + 1] !== "" && !block.lines[end + 1].startsWith("@@")) end++;
+    return { file: block.file, lines: block.lines.slice(start, end + 1).map((line) => line.slice(0, 120)) };
+  }
+  return null;
+}
+
+function shuffle<T>(items: T[]) {
+  return [...items].sort(() => Math.random() - 0.5);
+}
+
+/** A claim Red can make about Green: "when <input> is <value>, Green always <outcome>". True or false, from the table. */
+function makeClaim(table: PuzzleRow[], inputs: PuzzleInput[]): Extract<Round, { kind: "claim" }> | null {
+  const options: Array<Extract<Round, { kind: "claim" }>> = [];
+  inputs.forEach((input, index) => {
+    for (const value of input.values) {
+      const rows = table.filter((row) => row.values[index] === value.id);
+      if (rows.length < 2) continue;
+      const outcomes = [...new Set(rows.map((row) => row.new))];
+      if (outcomes.length === 1) options.push({ kind: "claim", input: index, value: value.id, outcome: outcomes[0], truth: true, counter: null });
+      else {
+        const common = outcomes.sort((a, b) => rows.filter((row) => row.new === b).length - rows.filter((row) => row.new === a).length)[0];
+        const counter = rows.find((row) => row.new !== common)!;
+        options.push({ kind: "claim", input: index, value: value.id, outcome: common, truth: false, counter: counter.key });
+      }
     }
-  }
-  return resolved;
-}
-
-const HEX = /^#[0-9a-f]{6}$/i;
-
-/** Clamp the design and guarantee the level order: [intro], fix, [tradeoff-0], case-0..N, hunt. */
-function normaliseDesign(design: Design, diff: string): PuzzleDesign {
-  const colors = (design.colors ?? []).filter((color) => HEX.test(color));
-  const system = (design.system ?? []).slice(0, 5);
-  if (system.length && !system.some((stage) => stage.changed)) system[Math.floor(system.length / 2)].changed = true;
-  const tradeoffs = (design.tradeoffs ?? []).slice(0, 1).map((entry) => ({ ...entry, aiView: ["worth", "unsure", "not"].includes(entry.aiView) ? entry.aiView : "unsure" }) as PuzzleTradeoff);
-  const cases = (design.cases ?? []).slice(0, 2).map((entry) => ({
-    ...entry,
-    origin: entry.origin === "existing" ? "existing" : "introduced",
-    aiLikelihood: ["likely", "rare", "never"].includes(entry.aiLikelihood) ? entry.aiLikelihood : "rare",
-  }) as PuzzleCase);
-  const codeSpots = resolveCodeSpots(design.codeSpots, diff);
-  const spotIds = new Set(codeSpots.map((spot) => spot.id));
-
-  const designed = design.levels ?? [];
-  const beats = [
-    ...(designed.some((level) => level.beat === "intro") ? ["intro"] : []),
-    "fix",
-    ...tradeoffs.map((_, index) => `tradeoff-${index}`),
-    ...cases.map((_, index) => `case-${index}`),
-    "hunt",
-  ];
-  const levels: Level[] = beats.map((beat) => {
-    const found = designed.find((level) => level.beat === beat);
-    const parsed = parseQuestionKey(beat);
-    const subject = parsed?.kind === "case" ? cases[parsed.index] : undefined;
-    const fallback: Level = {
-      beat,
-      title: subject?.title ?? (beat === "fix" ? "What changed" : beat === "hunt" ? "Break it" : tradeoffs[0]?.title ?? "Warm-up"),
-      goal: beat === "fix" ? `Make it work: ${design.solved?.after ?? ""}` : beat === "hunt" ? design.verdictQuestion : subject ? `Make it happen: ${subject.title}` : "",
-      setup: subject ? subject.scenario : beat === "fix" ? design.solved?.situation ?? "" : "",
-      solution: subject ? subject.outcome : "",
-      teaches: "",
-      codeSpot: "",
-      peekMoment: "",
-    };
-    const level = found ? { ...fallback, ...found, beat } : fallback;
-    return { ...level, codeSpot: spotIds.has(level.codeSpot) ? level.codeSpot : "" };
   });
-  for (const spot of codeSpots) {
-    if (levels.some((level) => level.codeSpot === spot.id)) continue;
-    const free = levels.find((level) => !level.codeSpot && level.beat !== "hunt" && level.beat !== "intro");
-    if (free) free.codeSpot = spot.id;
-  }
-
-  const { styleName, colors: _colors, dimension, codeSpots: _spots, ...rest } = design;
-  void _colors;
-  void _spots;
-  return {
-    ...rest,
-    theme: {
-      name: styleName || design.title,
-      colors: colors.length >= 3 ? colors.slice(0, 5) : ["#f7f6f2", "#161616", "#ff4d2e"],
-      dimension: dimension === "3d" ? "3d" : "2d",
-    },
-    system,
-    switchLabels: { old: design.switchLabels?.old || "Old way", new: design.switchLabels?.new || "New way" },
-    solved: { ...design.solved, aiView: ["works", "partly", "no"].includes(design.solved?.aiView) ? design.solved.aiView : "partly" },
-    tradeoffs,
-    cases,
-    levels,
-    codeSpots,
-    sprites: (design.sprites ?? []).slice(0, 4),
-  };
+  if (!options.length) return null;
+  const wantTrue = Math.random() < 0.5;
+  const preferred = options.filter((option) => option.truth === wantTrue);
+  return shuffle(preferred.length ? preferred : options)[0];
 }
 
-export async function designPuzzle(pr: PullRequestSource, notes: ResearchNotes | null, fallback: string, recent: Puzzle[] = [], signal?: AbortSignal) {
-  const { data, model } = await generateJson<Design>({
-    model: MODELS.design,
-    prompt: designPrompt(pr, researchSection(notes, fallback, pr), offerMechanics(), recent),
-    schema: designSchema,
-    thinking: DESIGN_THINKING,
-    signal,
+/** Rows that differ from `row` in exactly one input (optionally: in that particular input). */
+function neighbours(table: PuzzleRow[], row: PuzzleRow, input?: number) {
+  return table.filter(
+    (other) =>
+      other.key !== row.key &&
+      other.values.filter((value, index) => value !== row.values[index]).length === 1 &&
+      (input === undefined || other.values[input] !== row.values[input]),
+  );
+}
+
+/** A case where exactly one condition decides Green's outcome (changing it changes the outcome; changing the others doesn't). */
+function makePivot(table: PuzzleRow[], inputs: PuzzleInput[]): Extract<Round, { kind: "pivot" }> | null {
+  if (inputs.length < 2) return null;
+  for (const row of shuffle(table)) {
+    const complete = inputs.every((_, index) => neighbours(table, row, index).length > 0);
+    const decisive = inputs.map((_, index) => neighbours(table, row, index).some((other) => other.new !== row.new));
+    if (complete && decisive.filter(Boolean).length === 1) return { kind: "pivot", row: row.key, input: decisive.indexOf(true) };
+  }
+  return null;
+}
+
+/** Three cases with the same Green outcome and one with a different one. */
+function makeOdd(table: PuzzleRow[]): Extract<Round, { kind: "odd" }> | null {
+  const groups = new Map<string, PuzzleRow[]>();
+  for (const row of table) groups.set(row.new, [...(groups.get(row.new) ?? []), row]);
+  const big = shuffle([...groups.values()].filter((rows) => rows.length >= 3))[0];
+  const others = table.filter((row) => big && row.new !== big[0].new);
+  if (!big || !others.length) return null;
+  const odd = shuffle(others)[0];
+  return { kind: "odd", rows: shuffle([...shuffle(big).slice(0, 3), odd]).map((row) => row.key), odd: odd.key };
+}
+
+/** "When <input> is ___, Green always ends at <outcome>": only rules that really hold, with at least one wrong option. */
+function makeRule(table: PuzzleRow[], inputs: PuzzleInput[]): Extract<Round, { kind: "rule" }> | null {
+  const options: Array<Extract<Round, { kind: "rule" }>> = [];
+  inputs.forEach((input, index) => {
+    for (const outcomeId of new Set(table.map((row) => row.new))) {
+      const answers = input.values
+        .map((value) => value.id)
+        .filter((value) => {
+          const rows = table.filter((row) => row.values[index] === value);
+          return rows.length >= 2 && rows.every((row) => row.new === outcomeId);
+        });
+      if (answers.length && answers.length < input.values.length) options.push({ kind: "rule", input: index, outcome: outcomeId, answers });
+    }
   });
-  return { design: normaliseDesign(data, pr.diff), model };
-}
-
-/* ---------- Build (one game, as a background interaction) ---------- */
-
-const THREE_VERSION = "0.170.0";
-const THREE_BASE = `https://cdn.jsdelivr.net/npm/three@${THREE_VERSION}/`;
-const SFX_NAMES = "tap, pick, drop, snap, pop, whoosh, tick, success, fail, buzz, crack, coin";
-
-function levelBrief(design: PuzzleDesign, level: Level, index: number) {
-  const parsed = parseQuestionKey(level.beat);
-  const spot = design.codeSpots.find((candidate) => candidate.id === level.codeSpot);
-  const head = `Level ${index + 1} "${level.title}" [${level.beat}]
-  Goal: ${level.goal}
-  Setup: ${level.setup}
-  Intended solution (don't reveal; use it to verify the level is solvable and to write hints): ${level.solution}
-  Teaches: ${level.teaches}`;
-  const peek = spot
-    ? `\n  Code peek: right AFTER the player has seen this happen: ${level.peekMoment || spot.caption}, call
-  SlopHop.peek("${spot.id}", <the element where it happened>, "<what just happened, plain words, max 12 words>").`
-    : "";
-  let end = "";
-  if (level.beat === "intro") end = "When solved: move on (no judgment).";
-  else if (level.beat === "fix") {
-    end = `Use <sh-switch old="${design.switchLabels.old}" new="${design.switchLabels.new}"> to flip the changed part between old and new; the player must see it go wrong the old way and right the new way.
-  When solved: await SlopHop.judge("fix");`;
-  } else if (parsed?.kind === "tradeoff") {
-    const entry = design.tradeoffs[parsed.index];
-    end = `Give and take "${entry.title}": they must feel what we win (${entry.gain}) and what we lose (${entry.cost}).
-  When solved: await SlopHop.judge("tradeoff", ${parsed.index});`;
-  } else if (parsed?.kind === "case") {
-    const entry = design.cases[parsed.index];
-    end = `Tricky situation "${entry.title}": ${entry.scenario} Result: ${entry.outcome} (${entry.brokePromise ? "BREAKS the promise" : "promise holds"}).
-  The player discovers it by building it; don't set it up for them.
-  When they reach it: await SlopHop.judge("case", ${parsed.index}, { outcome: "<what happened, plain words>", brokePromise: ${entry.brokePromise} });`;
-  } else if (level.beat === "hunt") {
-    end = `The hunt: a sandbox of the same mechanic, everything can be grabbed, emptied, stretched. Show "${design.verdictQuestion}" small.
-  Two buttons: "I broke it" (capture what they built + what happened + optional one-line note) and "Couldn't break it".
-  Then SlopHop.verdict({ verdict: "breaks" | "holds", evidence: "<what they set up and what happened>", score: <levels solved> }) and a short, warm ending.`;
-  }
-  return `${head}${peek}\n  ${end}`;
-}
-
-function buildPrompt(design: PuzzleDesign) {
-  const sprites = design.sprites.map((sprite, index) => `${index}: ${sprite.name} (${sprite.look})`).join("; ");
-  return `Build "${design.title}": ONE complete, carefully crafted puzzle game in a single self-contained HTML file.
-It lets smart adults who don't code see, test and judge a real code change. Bar: the craft of Brilliant.org, the clarity of Brain Age,
-the wit of WarioWare, the depth of a great indie puzzle game. Fun for grown-ups; never banal or childish.
-
-THE WORLD
-Promise: "${design.promise}"
-The whole system, in order: ${design.system.map((entry) => `${entry.emoji} ${entry.name}${entry.changed ? " [CHANGED]" : ""} (${entry.role})`).join(" -> ")}
-How the changed part behaved BEFORE: ${design.rulesBefore.join(" | ")}
-How it behaves NOW (implement exactly, quirks included, for ANY state the player can create): ${design.rules.join(" | ")}
-
-THE MECHANIC: ${design.mechanic.name}
-${design.mechanic.core}
-Twist: ${design.mechanic.twist}
-
-LEVELS (one mechanic, each level adds one wrinkle)
-${design.levels.map((level, index) => levelBrief(design, level, index)).join("\n\n")}
-
-PACING
-- Calm. NO timers, countdowns, lives or failure screens. Let people think and experiment.
-- If someone seems stuck (~30s without progress), gently pulse something useful or make the <sh-hint> available.
-- Levels flow into each other with a short, satisfying transition; the player can replay the current level (a small reset).
-
-THE CONTRACT (must)
-- Begin with: await SlopHop.started; (the host shows a briefing first). No start screen, no title screen.
-- Direct manipulation with pointer events (drag, rotate, hold, swipe, stack). No multiple-choice, no option-button rows, chips or dropdowns.
-  At most 6 <button> elements in total, including the hunt's two buttons and a reset.
-- Never ask the judgment questions yourself; the host asks after each SlopHop.judge(...).
-- Never render code. Code peeks: call SlopHop.peek(id, element, "what just happened") only right AFTER the player has visibly seen
-  the effect of that code (never before, never at random). The host shows a small "why?" tag next to that element; the player taps it
-  to see what happened, why, and the real code.
-- Sound: SlopHop.sfx(name) on every meaningful touch and event. Names: ${SFX_NAMES}.
-
-STANDARD ELEMENTS (provided by the host; use them where they fit, and style them via CSS variables:
---sh-ui-ink, --sh-ui-bg, --sh-ui-accent, --sh-ui-font, --sh-ui-radius)
-- <sh-promise>${design.promise}</sh-promise>: keep it visible. SlopHop.promise("ok" | "strained" | "broken") updates it (it cracks when broken).
-- <sh-switch old="..." new="...">: the old/new code switch. Listen for its "change" event (event.detail.value is "old" or "new").
-- <sh-goal level="2/5">goal text</sh-goal>: the current level's goal.
-- <sh-hint>hint text</sh-hint>: a small "?" that reveals the hint.
-- <sh-progress total="5" current="2"></sh-progress>: level dots.
-
-ART DIRECTION (this game's own): "${design.theme.name}"
-${design.artDirection}
-Palette: ${design.theme.colors.join(", ")} (background, ink, accent, extras). Any Google Fonts via <link>. ${design.theme.dimension === "3d" ? "This game is 3D (three.js)." : ""}
-${STYLE.gameCraft}
-Generated art (may be unavailable: ALWAYS draw a clean fallback with CSS/SVG/canvas):
-- SlopHop.assets.cover: URL of a cover illustration or null.
-- SlopHop.sprite(i): CSS declarations for sprite i of a 2x2 sheet on a white backdrop (or ""). Use "mix-blend-mode: multiply" on light
-  surfaces to drop the white, or set sprites on light tiles. Sprites: ${sprites}.
-
-PHONE FIRST, NO CLUTTER
-- Portrait phone (390x700) first; one screen, no scroll; scales up gracefully on desktop.
-- One focus area. Touch targets at least 48px. At most two short lines of text visible at once.
-- Leave the bottom 64px free of important controls (the host's code chip sits there).
-
-TECH
-- Output ONLY the HTML document, starting with <!doctype html>. Inline CSS and JS. No network requests, no external images.
-- three.js r170 is available via import map (import * as THREE from "three"; addons under "three/addons/"); keep it light, cap DPR at 2,
-  fall back to 2D if WebGL fails.
-- No music (the host plays it).
-
-PLAIN LANGUAGE (every label, hint and message)
-${STYLE.plainLanguage}
-Before finishing: play each level in your head against its intended solution, and reread every visible string.`;
-}
-
-/** Static checks for the game contract. Returns human-readable problems (empty = fine). */
-export function checkGame(html: string, design: PuzzleDesign) {
-  const problems: string[] = [];
-  const has = (pattern: RegExp) => pattern.test(html);
-  const buttons = (html.match(/<button\b/gi) ?? []).length + (html.match(/createElement\(\s*["']button["']/gi) ?? []).length;
-  if (!has(/pointer(down|move)|touchstart/i)) problems.push("No direct manipulation: use pointer events to drag/rotate/hold/swipe objects.");
-  if (buttons > 7) problems.push(`Too many buttons (${buttons}); at most 6. Replace option buttons with objects to manipulate.`);
-  if (!has(/SlopHop\??\.started/)) problems.push("Missing `await SlopHop.started;` before the game begins.");
-  if (!has(/judge\??\.?\(\s*["']fix["']/)) problems.push('Missing `await SlopHop.judge("fix")` after the fix level.');
-  if (design.tradeoffs.length && !has(/["']tradeoff["']/)) problems.push('Missing `await SlopHop.judge("tradeoff", 0)` after the give-and-take level.');
-  if (!has(/["']case["']/)) problems.push('Missing `await SlopHop.judge("case", i, { outcome, brokePromise })` after each tricky-situation level.');
-  if (!has(/SlopHop\??\.verdict\??\.?\(/)) problems.push("Missing SlopHop.verdict(...) at the end of the hunt.");
-  for (const spot of design.codeSpots) {
-    if (!has(new RegExp(`peek\\??\\.?\\(\\s*["'\`]${spot.id}`))) problems.push(`Never calls SlopHop.peek("${spot.id}", element, "what just happened") after the player sees that effect.`);
-  }
-  if (!has(/SlopHop\??\.sfx/)) problems.push("No sound: call SlopHop.sfx(name) on touches and events.");
-  if (has(/setInterval\([^)]*(countdown|timeLeft|timer)/i) || has(/time'?s up|out of time/i)) problems.push("Remove timers and countdowns: the game must be calm and untimed.");
-  return problems;
-}
-
-function cleanHtml(raw: string) {
-  const html = raw.trim().replace(/^```(?:html)?\s*/i, "").replace(/```\s*$/, "").trim();
-  if (!/<html|<body|<!doctype/i.test(html)) throw new Error("Gemini did not return a playable HTML game.");
-  return html;
-}
-
-function repairPrompt(design: PuzzleDesign, html: string, problems: string[]) {
-  return `${buildPrompt(design)}
-
-----
-Here is a draft of this game that breaks the contract. Fix ALL of these problems, keep everything that already works, and output the
-complete corrected HTML document only.
-
-PROBLEMS
-${problems.map((problem) => `- ${problem}`).join("\n")}
-
-DRAFT
-${html}`;
-}
-
-async function startBuild(design: PuzzleDesign, attempt: number, draft?: { html: string; problems: string[] }): Promise<BuildState> {
-  const prompt = draft ? repairPrompt(design, draft.html, draft.problems) : buildPrompt(design);
-  const { id, model } = await startBackground({ model: MODELS.build, prompt, thinking: BUILD_THINKING, maxOutputTokens: BUILD_MAX_TOKENS });
-  return { interactionId: id, model, attempt, kind: draft ? "repair" : "build", startedAt: new Date().toISOString(), problems: draft?.problems ?? [] };
-}
-
-async function savePuzzle(puzzle: Puzzle) {
-  await saveFile(`puzzles/${puzzle.id}/meta.json`, JSON.stringify(puzzle, null, 2), "application/json");
+  return shuffle(options)[0] ?? null;
 }
 
 /**
- * Moves a building puzzle forward: checks the background interaction, saves the game when done,
- * and starts a repair or retry when the result breaks the contract. Safe to call repeatedly.
+ * One tweak: from a base case, up to three "what if…" single changes; exactly one makes Red and Green disagree
+ * (goal "disagree") or makes Green reach `target` (goal "outcome").
  */
-export async function advanceBuild(puzzle: Puzzle): Promise<Puzzle> {
-  if (puzzle.status !== "building" || !puzzle.build) return puzzle;
-  const state = await getBackground(puzzle.build.interactionId);
-  if (state.status === "running") return puzzle;
-
-  const existingDraft = await readText(`puzzles/${puzzle.id}/game.html`);
-  let html: string | null = null;
-  try {
-    html = state.status === "completed" ? cleanHtml(state.text) : null;
-  } catch {
-    html = null;
-  }
-
-  if (html) {
-    const problems = checkGame(html, puzzle);
-    const better = !existingDraft || problems.length <= (puzzle.build.problems.length || Infinity);
-    if (better) await saveFile(`puzzles/${puzzle.id}/game.html`, html, "text/html; charset=utf-8");
-    if (problems.length && puzzle.build.attempt < MAX_BUILD_ATTEMPTS) {
-      const next = await startBuild(puzzle, puzzle.build.attempt + 1, { html, problems }).catch(() => null);
-      if (next) return saveAndReturn({ ...puzzle, build: next });
+function makeTweak(table: PuzzleRow[], goal: "disagree" | "outcome", target?: string): Extract<Round, { kind: "tweak" }> | null {
+  const hits = (row: PuzzleRow) => (goal === "disagree" ? row.old !== row.new : row.new === target);
+  for (const base of shuffle(table)) {
+    if (hits(base)) continue;
+    const options = neighbours(table, base);
+    const right = shuffle(options.filter(hits));
+    const wrong = shuffle(options.filter((row) => !hits(row)));
+    if (right.length && wrong.length) {
+      const picked = shuffle([right[0], ...wrong.slice(0, 2)]);
+      return { kind: "tweak", base: base.key, goal, target, options: picked.map((row) => row.key), answer: right[0].key };
     }
-    if (problems.length) console.warn(`Game ${puzzle.id} still has contract problems`, problems);
-    return saveAndReturn({ ...puzzle, status: "ready", build: { ...puzzle.build, problems }, models: { ...puzzle.models, build: puzzle.build.model } });
   }
-
-  console.error(`Build ${puzzle.build.interactionId} failed`, state.error);
-  if (existingDraft) return saveAndReturn({ ...puzzle, status: "ready" });
-  if (puzzle.build.attempt < MAX_BUILD_ATTEMPTS) {
-    const next = await startBuild(puzzle, puzzle.build.attempt + 1).catch(() => null);
-    if (next) return saveAndReturn({ ...puzzle, build: next });
-  }
-  return saveAndReturn({ ...puzzle, status: "failed" });
-
-  async function saveAndReturn(next: Puzzle) {
-    await savePuzzle(next);
-    return next;
-  }
+  return null;
 }
 
-/* ---------- Art + music ---------- */
-
-function spriteSheetPrompt(design: PuzzleDesign) {
-  return `A 2x2 grid sprite sheet of four separate objects, each centred in its own quadrant with generous padding, on a pure white background.
-No text, no letters, no labels, no borders, no grid lines, no shadows crossing quadrants.
-Top-left: ${design.sprites[0]?.look}. Top-right: ${design.sprites[1]?.look}. Bottom-left: ${design.sprites[2]?.look}. Bottom-right: ${design.sprites[3]?.look}.
-Art direction: ${design.artDirection}. Keep the background pure white.`;
+/** Solved examples, then a mystery case. Examples are the mystery's neighbours, so the pattern is learnable. */
+function makePattern(table: PuzzleRow[]): Extract<Round, { kind: "pattern" }> | null {
+  for (const row of shuffle(table)) {
+    const examples = shuffle(neighbours(table, row)).slice(0, 3);
+    if (examples.length >= 2 && examples.some((example) => example.new !== row.new)) return { kind: "pattern", examples: examples.map((example) => example.key), row: row.key };
+  }
+  return null;
 }
 
-function musicPrompt(design: PuzzleDesign) {
-  return `${STYLE.musicDirection} Game: ${design.theme.name}. Flavour: ${design.musicVibe}.`;
+/** Along an ordered input (others fixed), Green's outcome flips exactly once: where? */
+function makeEdge(table: PuzzleRow[], inputs: PuzzleInput[]): Extract<Round, { kind: "edge" }> | null {
+  for (const index of shuffle(inputs.map((_, i) => i))) {
+    const input = inputs[index];
+    if (input.kind !== "scale" || input.values.length < 3) continue;
+    const contexts = new Map<string, PuzzleRow[]>();
+    for (const row of table) {
+      const context = row.values.filter((_, i) => i !== index).join("~");
+      contexts.set(context, [...(contexts.get(context) ?? []), row]);
+    }
+    for (const rows of shuffle([...contexts.values()])) {
+      const ordered = input.values.map((value) => rows.find((row) => row.values[index] === value.id));
+      if (ordered.some((row) => !row)) continue;
+      const flips = ordered.slice(1).map((row, i) => (row!.new !== ordered[i]!.new ? i + 1 : -1)).filter((flip) => flip > 0);
+      if (flips.length === 1) return { kind: "edge", input: index, rows: ordered.map((row) => row!.key), flip: flips[0] };
+    }
+  }
+  return null;
+}
+
+/**
+ * Rounds, built by our code from the table (never by the model). Each is ONE decision that fits the screen and can be
+ * reasoned out from the rulebooks: open on an applied rule, find where the change bites, a shuffled mix, try to break it.
+ */
+function buildRounds(table: PuzzleRow[], outcomes: PuzzleOutcome[], inputs: PuzzleInput[]): Round[] {
+  const changed = shuffle(table.filter((row) => row.old !== row.new));
+  const same = shuffle(table.filter((row) => row.old === row.new));
+  const opener: Round[] = [];
+  const first = changed[0] ?? same[0];
+  if (first) opener.push({ kind: "predict", row: first.key, side: "new" });
+  const disagree = makeTweak(table, "disagree");
+  if (disagree) opener.push(disagree);
+
+  const middle: Round[] = [];
+  const add = (round: Round | null) => {
+    if (round) middle.push(round);
+  };
+  add(makePattern(table));
+  add(makeEdge(table, inputs));
+  add(makeOdd(table));
+  add(makeRule(table, inputs) ?? makeClaim(table, inputs));
+  add(makePivot(table, inputs));
+  if (changed[1]) middle.push({ kind: "who", row: changed[1].key, shown: Math.random() < 0.5 ? "old" : "new" });
+  if (changed[2] ?? changed[1]) middle.push({ kind: "predict", row: (changed[2] ?? changed[1]).key, side: "old" });
+
+  const closer: Round[] = [];
+  const bad = outcomes.find((entry) => entry.tone === "bad" && table.some((row) => row.new === entry.id));
+  const breaker = bad ? makeTweak(table, "outcome", bad.id) : null;
+  if (breaker) closer.push(breaker);
+
+  return [...opener, ...shuffle(middle).slice(0, Math.max(0, 5 - opener.length - closer.length)), ...closer].slice(0, 5);
+}
+
+/** Validates the model's design against itself; throws when it's unusable. */
+function validate(design: Design) {
+  const usedInputIds = new Set<string>();
+  const inputs = (design.inputs ?? []).slice(0, 3).map((input, index) => {
+    const id = cleanId(input.id, `input-${index}`);
+    usedInputIds.add(id);
+    const values = (input.values ?? []).slice(0, 4).map((value, valueIndex) => ({
+      id: cleanId(value.id, `v${valueIndex}`),
+      label: String(value.label ?? "").slice(0, 40),
+      story: String(value.story ?? "").slice(0, 80),
+    }));
+    const unique = values.filter((value, i) => values.findIndex((other) => other.id === value.id) === i);
+    const kind: PuzzleInput["kind"] = input.kind === "toggle" && unique.length === 2 ? "toggle" : input.kind === "scale" ? "scale" : "choice";
+    return { id, label: String(input.label ?? "").slice(0, 40), explain: String(input.explain ?? "").slice(0, 120), kind, values: unique };
+  });
+  if (!inputs.length || inputs.some((input) => input.values.length < 2)) throw new Error("The puzzle design had unusable inputs.");
+
+  const outcomes = (design.outcomes ?? []).slice(0, 5).map((entry, index) => ({
+    id: cleanId(entry.id, `o${index}`),
+    label: String(entry.label ?? "").slice(0, 60),
+    tone: (["good", "bad", "neutral"].includes(entry.tone) ? entry.tone : "neutral") as PuzzleOutcome["tone"],
+  }));
+  const outcomeIds = new Set(outcomes.map((entry) => entry.id));
+
+  const valid = (values: string[]) => values.length === inputs.length && values.every((value, index) => inputs[index].values.some((candidate) => candidate.id === value));
+  const table: PuzzleRow[] = [];
+  for (const row of design.table ?? []) {
+    const values = (row.values ?? []).map((value, index) => cleanId(value, `v${index}`));
+    const old = cleanId(row.old, "");
+    const next = cleanId(row.new, "");
+    if (!valid(values) || !outcomeIds.has(old) || !outcomeIds.has(next)) continue;
+    const key = rowKey(values);
+    if (!table.some((existing) => existing.key === key)) table.push({ key, values, old, new: next });
+  }
+  if (table.length < 2) throw new Error("The puzzle's logic table came back empty. Try again.");
+
+  return { inputs, outcomes: outcomes.filter((entry) => table.some((row) => row.old === entry.id || row.new === entry.id)), table: table.slice(0, MAX_ROWS) };
 }
 
 /* ---------- Pipeline ---------- */
 
-function newId() {
-  return `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
-}
+const HEDGE_MS = Number(process.env.MODEL_HEDGE_MS || 40_000);
 
 /**
- * Research + design + art + music happen in this request. The game itself is built by a Gemini
- * background interaction; the puzzle is saved as "building" and finished by advanceBuild() when polled.
+ * Code-execution turns vary a lot in length. Start the primary model; if it hasn't answered after HEDGE_MS (or fails),
+ * start a fast backup in parallel and take the first VALID answer. The loser is aborted (we stop polling it).
  */
+async function modelHedged(pr: PullRequestSource, focus: string, signal?: AbortSignal) {
+  const prompt = modelPrompt(pr, focus);
+  const controllers: AbortController[] = [];
+  const run = (model: string, thinking: string) => {
+    const controller = new AbortController();
+    controllers.push(controller);
+    return generateJson<Design>({
+      model,
+      prompt,
+      schema,
+      tools: [{ type: "code_execution" }],
+      thinking,
+      signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+    }).then(({ data, model: used }) => ({ data, model: used, ...validate(data) }));
+  };
+
+  return new Promise<Awaited<ReturnType<typeof run>>>((resolve, reject) => {
+    let settled = false;
+    let failures = 0;
+    let backupStarted = false;
+    const finish = (result: Awaited<ReturnType<typeof run>>) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const controller of controllers) controller.abort();
+      resolve(result);
+    };
+    const fail = (error: unknown) => {
+      failures += 1;
+      if (!backupStarted) startBackup();
+      else if (failures >= 2 && !settled) {
+        settled = true;
+        reject(error);
+      }
+    };
+    const startBackup = () => {
+      if (backupStarted || settled) return;
+      backupStarted = true;
+      run(MODELS.backup, "low").then(finish, fail);
+    };
+    const timer = setTimeout(startBackup, HEDGE_MS);
+    run(MODELS.design, process.env.GEMINI_DESIGN_THINKING || "medium").then(finish, fail);
+  });
+}
+
+/** A small, real slice of a PR for the stage: counts and a few changed lines. */
+function stageCard(pr: PullRequestSource): StageCard {
+  const changed = pr.diff.split("\n").filter((line) => /^[+-]/.test(line) && !/^(\+\+\+|---)( |$)/.test(line) && line.trim().length > 2);
+  return {
+    repository: pr.repository,
+    number: pr.number,
+    title: pr.title,
+    additions: changed.filter((line) => line.startsWith("+")).length,
+    deletions: changed.filter((line) => line.startsWith("-")).length,
+    lines: changed.slice(0, 18).map((line) => line.replace(/\s+/g, " ").slice(0, 44)),
+  };
+}
+
+const newId = () => `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+
 export async function createPuzzle(options: { prUrl?: string; emit: (event: ProgressEvent) => void; signal?: AbortSignal }) {
   const { emit, signal } = options;
   const id = newId();
 
-  emit({ type: "stage", stage: "source", status: "active" });
-  const [pr, recent] = await Promise.all([
-    options.prUrl ? getPullRequest(options.prUrl) : findPuzzleWorthyPullRequest(),
-    listPuzzles(6).catch(() => [] as Puzzle[]),
-  ]);
-  emit({ type: "stage", stage: "source", status: "done", detail: `${pr.repository}#${pr.number} · ${pr.title}` });
+  emit({ type: "stage", stage: "fetch", status: "active" });
+  const candidates = options.prUrl ? [await getPullRequest(options.prUrl)] : await findCandidatePullRequests(CANDIDATES);
+  emit({ type: "stage", stage: "fetch", status: "done", detail: `${candidates.length} pull request${candidates.length === 1 ? "" : "s"}` });
 
-  emit({ type: "stage", stage: "research", status: "active" });
-  const research = await researchPullRequest({
-    pr,
-    signal,
-    onStep: (detail) => emit({ type: "stage", stage: "research", status: "active", detail }),
-  }).catch((error: unknown) => {
-    console.error("Research failed", error);
-    return { notes: null, model: undefined, steps: 0, overview: "", fallback: "" };
-  });
+  // Step 1: Gemini Decisions scores every candidate; the best one wins.
+  emit({ type: "stage", stage: "rank", status: "active", detail: `Scoring ${candidates.length} with Gemini Decisions` });
+  const ranked = await rankCandidates(candidates, signal);
+  const top = ranked.slice(0, 5);
   emit({
     type: "stage",
-    stage: "research",
-    status: research.notes ? "done" : "skipped",
-    detail: research.notes ? `${research.steps} look-ups · ${research.notes.edgeCases.length} edge cases found` : "Went with the diff alone",
-  });
-
-  emit({ type: "stage", stage: "design", status: "active" });
-  const { design, model: designModel } = await designPuzzle(pr, research.notes, research.fallback, recent, signal);
-  emit({
-    type: "stage",
-    stage: "design",
+    stage: "rank",
     status: "done",
-    detail: `${design.emoji} ${design.title} · ${design.theme.name} · ${design.mechanic.name} · ${design.levels.length} levels`,
+    detail: `${ranked[0].pr.repository}#${ranked[0].pr.number}${ranked[0].score !== null ? ` scored ${Math.round(ranked[0].score * 100)}%` : ""}`,
+    cards: top.map(({ pr: candidate, score }) => ({ ...stageCard(candidate), ...(score !== null ? { score } : {}) })),
   });
-
-  emit({ type: "stage", stage: "build", status: "active", detail: "Starting the build" });
-  const build = await startBuild(design, 1);
-  emit({ type: "stage", stage: "build", status: "active", detail: `${build.model} is building the game (takes a few minutes)` });
-  emit({ type: "stage", stage: "art", status: IMAGES_ENABLED ? "active" : "skipped", detail: IMAGES_ENABLED ? undefined : "Images are off" });
-  emit({ type: "stage", stage: "music", status: "active" });
-
-  const saveImage = (name: string, prompt: string, aspectRatio: string) =>
-    generateImage({ prompt, aspectRatio, signal })
-      .then(async (image) => {
-        const file = `${name}.${image.extension}`;
-        await saveFile(`puzzles/${id}/${file}`, image.bytes, image.mimeType);
-        return file;
-      })
-      .catch((error: unknown) => {
-        console.error(`Image ${name} failed`, error);
-        return null;
-      });
-  const artTask = IMAGES_ENABLED
-    ? Promise.all([
-        saveImage("cover", `${design.coverPrompt}. Art direction: ${design.artDirection}. No text or letters anywhere.`, "4:3"),
-        saveImage("sprites", spriteSheetPrompt(design), "1:1"),
-      ]).then(([cover, sprites]) => {
-        emit({ type: "stage", stage: "art", status: cover || sprites ? "done" : "skipped", detail: cover || sprites ? "Cover and sprites drawn" : "No art this time" });
-        return { cover, sprites };
-      })
-    : Promise.resolve({ cover: null, sprites: null });
-
-  const musicTask = generateMusic({ prompt: musicPrompt(design), signal })
-    .then(async (music) => {
-      await saveFile(`puzzles/${id}/music.${music.extension}`, music.bytes, music.mimeType);
-      emit({ type: "stage", stage: "music", status: "done", detail: "Soundtrack composed" });
-      return music.extension;
+  // Flair (generated props + the music's project line), then the beat, all in parallel with the modelling below.
+  const flairTask = designFlair(ranked[0].pr, signal).catch((error: unknown) => {
+    console.error("Flair design failed", error);
+    return { music: "A bouncy synth lead with playful toy-like sound effects.", bpm: BPM, props: [], fmv: [] } as Flair;
+  });
+  const musicTask = flairTask
+    .then(async (flair) => {
+      emit({ type: "stage", stage: "music", status: "active", props: flair.props });
+      const music = await composeMusic(ranked[0].pr, flair.music, flair.bpm, signal);
+      const file = `music.${music.extension}`;
+      await saveFile(`puzzles/${id}/${file}`, music.bytes, music.mimeType);
+      emit({ type: "stage", stage: "music", status: "done" });
+      return file;
     })
     .catch((error: unknown) => {
       console.error("Music generation failed", error);
-      emit({ type: "stage", stage: "music", status: "skipped", detail: "No soundtrack this time" });
+      emit({ type: "stage", stage: "music", status: "skipped" });
       return null;
     });
 
-  const [assets, musicExtension] = await Promise.all([artTask, musicTask]);
+  // The cutscene: as soon as its script is written, Gemini Omni films it (360p) with the real mascots as references.
+  const fmvTask = flairTask
+    .then(async (flair): Promise<Puzzle["fmv"]> => {
+      if (flair.fmv.length < 2) return null;
+      emit({ type: "stage", stage: "fmv", status: "active" });
+      const video = await generateVideo({
+        prompt: fmvPrompt(ranked[0].pr, flair.fmv),
+        images: [...mascotReferences("add"), ...mascotReferences("del")],
+        seconds: FMV_SECONDS,
+        signal,
+      });
+      await saveFile(`puzzles/${id}/fmv.mp4`, video.bytes, video.mimeType);
+      emit({ type: "stage", stage: "fmv", status: "done" });
+      return { file: "fmv.mp4", lines: flair.fmv.map(({ at, who, line }) => ({ at, who, text: line })) };
+    })
+    .catch((error: unknown) => {
+      console.error("Cutscene generation failed", error);
+      emit({ type: "stage", stage: "fmv", status: "skipped" });
+      return null;
+    });
 
+  const pr = await addContext(ranked[0].pr);
+  const choice = { reason: ranked[0].score !== null ? `Gemini Decisions ranked it best of ${candidates.length} (${Math.round(ranked[0].score * 100)}%).` : "Best by logic heuristic." };
+  emit({ type: "stage", stage: "pick", status: "done", detail: `${pr.repository}#${pr.number} · ${pr.title}`, pick: 0, component: pr.title });
+
+  // Step 2: model that one piece with code execution, on the chosen PR only (hedged against slow runs).
+  emit({ type: "stage", stage: "model", status: "active" });
+  const { data, model, inputs, outcomes, table } = await modelHedged(pr, FOCUS, signal);
+  emit({ type: "stage", stage: "model", status: "done", detail: `${table.length} cases · ${table.filter((row) => row.old !== row.new).length} changed` });
+
+  const [musicFile, flair, fmv] = await Promise.all([musicTask, flairTask, fmvTask]);
   emit({ type: "stage", stage: "save", status: "active" });
   const puzzle: Puzzle = {
-    ...design,
     format: FORMAT,
     id,
     createdAt: new Date().toISOString(),
-    status: "building",
-    build,
-    musicFile: musicExtension ? `music.${musicExtension}` : null,
-    assets,
-    models: {
-      research: research.model,
-      design: designModel,
-      build: build.model,
-      music: musicExtension ? MODELS.music : null,
-      image: assets.cover || assets.sprites ? MODELS.image : null,
+    pr: { url: pr.url, repository: pr.repository, number: pr.number, title: pr.title, author: pr.author, mergedAt: pr.mergedAt, madeWith: pr.madeWith },
+    candidates: candidates.map((candidate) => ({ repository: candidate.repository, number: candidate.number, title: candidate.title, url: candidate.url })),
+    pickReason: String(choice.reason ?? ""),
+    title: String(data.title ?? pr.title),
+    project: String(data.project ?? ""),
+    change: String(data.change ?? ""),
+    where: String(data.where ?? ""),
+    scenario: String(data.scenario ?? ""),
+    rules: {
+      old: (data.rules?.old ?? []).slice(0, 4).map((line) => String(line).slice(0, 140)),
+      new: (data.rules?.new ?? []).slice(0, 4).map((line) => String(line).slice(0, 140)),
     },
-    research: research.notes,
-    source: { url: pr.url, repository: pr.repository, number: pr.number, title: pr.title, author: pr.author, mergedAt: pr.mergedAt },
+    component: { name: String(data.component?.name ?? ""), what: String(data.component?.what ?? ""), file: String(data.component?.file ?? "") },
+    lines: { add: String(data.lines?.add ?? ""), del: String(data.lines?.del ?? "") },
+    inputs,
+    outcomes,
+    table,
+    rounds: buildRounds(table, outcomes, inputs),
+    code: resolveCode(data.codeAnchor, pr.diff),
+    props: flair.props,
+    musicStyle: flair.music,
+    bpm: flair.bpm,
+    fmv,
+    musicFile,
+    models: { design: model, music: musicFile ? MODELS.music : null },
   };
-  await savePuzzle(puzzle);
-  emit({ type: "stage", stage: "save", status: "done", detail: "Saved; the game finishes building in the background" });
+  await saveFile(`puzzles/${id}/meta.json`, JSON.stringify(puzzle, null, 2), "application/json");
+  emit({ type: "stage", stage: "save", status: "done" });
   return puzzle;
 }
 
 /* ---------- Reading ---------- */
 
-function parsePuzzle(text: string | null): Puzzle | null {
+function parse(text: string | null): Puzzle | null {
   if (!text) return null;
   const puzzle = JSON.parse(text) as Puzzle;
   return puzzle.format === FORMAT ? puzzle : null;
 }
 
-export async function getPuzzle(id: string): Promise<Puzzle | null> {
-  if (!isPuzzleId(id)) return null;
-  return parsePuzzle(await readText(`puzzles/${id}/meta.json`));
+export async function getPuzzle(id: string) {
+  return isPuzzleId(id) ? parse(await readText(`puzzles/${id}/meta.json`)) : null;
 }
 
-export async function getGameHtml(id: string) {
-  if (!isPuzzleId(id)) return null;
-  return readText(`puzzles/${id}/game.html`);
-}
-
-export async function getAsset(puzzle: Puzzle, name: string) {
-  const file = name === "cover" ? puzzle.assets.cover : name === "sprites" ? puzzle.assets.sprites : null;
-  return file ? readFile(`puzzles/${puzzle.id}/${file}`) : null;
-}
-
-/** Newest first, by creation time (meta files are rewritten while building). */
-export async function listPuzzles(limit = 60): Promise<Puzzle[]> {
-  const files = await listFiles("puzzles/");
-  const metas = files
+export async function listPuzzles(limit = 40): Promise<Puzzle[]> {
+  const metas = (await listFiles("puzzles/"))
     .filter((file) => file.pathname.endsWith("/meta.json"))
     .sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime())
     .slice(0, limit * 2);
-  const puzzles = await Promise.all(metas.map((file) => readText(file.pathname).then(parsePuzzle).catch(() => null)));
-  return puzzles
-    .filter((puzzle): puzzle is Puzzle => puzzle !== null)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, limit);
+  const puzzles = await Promise.all(metas.map((file) => readText(file.pathname).then(parse).catch(() => null)));
+  return puzzles.filter((puzzle): puzzle is Puzzle => puzzle !== null).slice(0, limit);
 }
 
-/* ---------- Crowd signals ---------- */
-// One small file per signal, with the answer in the path, so tallies need only a list call.
+/* ---------- Crowd votes: does Green's behaviour seem right for this exact case? ---------- */
 
-export async function saveVerdict(id: string, input: { verdict: Verdict; evidence: string; score: number }) {
-  const record = { ...input, evidence: input.evidence.slice(0, 2000), createdAt: new Date().toISOString() };
-  await saveFile(`verdicts/${id}/${input.verdict}/${Date.now()}-${randomBytes(3).toString("hex")}.json`, JSON.stringify(record), "application/json");
+export async function saveVote(id: string, row: string, vote: "right" | "off") {
+  await saveFile(`votes/${id}/${row}/${vote}/${Date.now()}-${randomBytes(3).toString("hex")}.json`, "{}", "application/json");
 }
 
-export async function tallyVerdicts(id?: string): Promise<Record<string, VerdictTally>> {
-  const files = await listFiles(id ? `verdicts/${id}/` : "verdicts/");
-  const tally: Record<string, VerdictTally> = {};
-  for (const file of files) {
-    const [, puzzleId, verdict] = file.pathname.split("/");
-    if (verdict !== "holds" && verdict !== "breaks") continue;
-    tally[puzzleId] ??= { holds: 0, breaks: 0 };
-    tally[puzzleId][verdict] += 1;
+export async function tallyVotes(id: string): Promise<VoteTally> {
+  const tally: VoteTally = {};
+  for (const file of await listFiles(`votes/${id}/`)) {
+    const [, , row, vote] = file.pathname.split("/");
+    if (vote !== "right" && vote !== "off") continue;
+    tally[row] ??= { right: 0, off: 0 };
+    tally[row][vote] += 1;
   }
   return tally;
-}
-
-/** Most recent breaking cases players reported in the hunt. */
-export async function recentBreaks(id: string, limit = 5): Promise<string[]> {
-  const files = (await listFiles(`verdicts/${id}/breaks/`)).sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime()).slice(0, limit);
-  const records = await Promise.all(files.map((file) => readFile(file.pathname).then((found) => (found ? JSON.parse(found.body.toString("utf8")) : null)).catch(() => null)));
-  return records.map((record) => (record?.evidence as string | undefined)?.trim()).filter((evidence): evidence is string => Boolean(evidence));
-}
-
-/** Standardized judgments (see lib/review.ts), one file each: judgments/<puzzle>/<question>/<answer>/<ts>.json */
-export function isValidAnswer(key: string, answer: string) {
-  const parsed = parseQuestionKey(key);
-  return Boolean(parsed && ANSWERS[parsed.kind].some((option) => option.value === answer));
-}
-
-export async function saveJudgment(id: string, input: { key: string; answer: string; detail: string }) {
-  const record = { ...input, detail: input.detail.slice(0, 500), createdAt: new Date().toISOString() };
-  await saveFile(`judgments/${id}/${input.key}/${input.answer}/${Date.now()}-${randomBytes(3).toString("hex")}.json`, JSON.stringify(record), "application/json");
-}
-
-/** Tallies per puzzle -> question -> answer. */
-export async function tallyJudgments(id?: string): Promise<Record<string, Record<string, Tally>>> {
-  const files = await listFiles(id ? `judgments/${id}/` : "judgments/");
-  const tally: Record<string, Record<string, Tally>> = {};
-  for (const file of files) {
-    const [, puzzleId, key, answer] = file.pathname.split("/");
-    if (!isValidAnswer(key, answer)) continue;
-    tally[puzzleId] ??= {};
-    tally[puzzleId][key] ??= {};
-    tally[puzzleId][key][answer] = (tally[puzzleId][key][answer] ?? 0) + 1;
-  }
-  return tally;
-}
-
-/* ---------- Serving the game ---------- */
-
-/** Standard elements every game can use: <sh-promise>, <sh-switch>, <sh-goal>, <sh-hint>, <sh-progress>. */
-const UI_CSS = `
-:root{--sh-ui-ink:currentColor;--sh-ui-bg:rgba(255,255,255,.9);--sh-ui-accent:#ff4d2e;--sh-ui-font:inherit;--sh-ui-radius:999px}
-sh-promise,sh-goal,sh-switch,sh-hint,sh-progress{font-family:var(--sh-ui-font);color:var(--sh-ui-ink);box-sizing:border-box}
-sh-promise{display:inline-flex;align-items:baseline;gap:8px;padding:6px 14px;border:1px solid var(--sh-ui-ink);border-radius:var(--sh-ui-radius);background:var(--sh-ui-bg);font-size:14px;line-height:1.3;position:relative;transition:color .3s,border-color .3s}
-sh-promise .sh-label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;opacity:.6}
-sh-promise[state=strained]{border-style:dashed;animation:sh-wobble .6s ease}
-sh-promise[state=broken]{color:var(--sh-ui-accent);border-color:var(--sh-ui-accent);animation:sh-shake .45s ease}
-sh-promise[state=broken] .sh-text{text-decoration:line-through;text-decoration-thickness:2px}
-sh-promise[state=broken]::after{content:"";position:absolute;left:12%;right:12%;top:50%;height:2px;background:var(--sh-ui-accent);transform:rotate(-4deg);clip-path:polygon(0 0,18% 100%,36% 0,54% 100%,72% 0,90% 100%,100% 0,100% 100%,0 100%)}
-sh-goal{display:inline-flex;align-items:baseline;gap:8px;font-size:16px;line-height:1.3}
-sh-goal .sh-level{font-size:11px;letter-spacing:.06em;opacity:.55}
-sh-switch{display:inline-flex;position:relative;padding:3px;border:1px solid var(--sh-ui-ink);border-radius:var(--sh-ui-radius);background:var(--sh-ui-bg);touch-action:none;user-select:none}
-sh-switch button{position:relative;z-index:1;min-height:40px;padding:0 16px;border:0;background:none;color:inherit;font:inherit;font-size:14px;cursor:pointer;border-radius:var(--sh-ui-radius);transition:color .25s}
-sh-switch .sh-thumb{position:absolute;top:3px;bottom:3px;border-radius:var(--sh-ui-radius);background:var(--sh-ui-ink);transition:left .3s cubic-bezier(.3,1.4,.5,1),width .3s}
-sh-switch button[aria-pressed=true]{color:var(--sh-ui-bg)}
-sh-hint{display:inline-flex;align-items:center;gap:8px;position:relative}
-sh-hint button{width:40px;height:40px;border:1px solid var(--sh-ui-ink);border-radius:50%;background:var(--sh-ui-bg);color:inherit;font:inherit;cursor:pointer}
-sh-hint .sh-bubble{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);width:max-content;max-width:min(280px,80vw);padding:10px 12px;border:1px solid var(--sh-ui-ink);border-radius:12px;background:var(--sh-ui-bg);font-size:14px;line-height:1.35;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s}
-sh-hint[open] .sh-bubble{opacity:1;transform:translate(-50%,-4px)}
-sh-progress{display:inline-flex;gap:6px}
-sh-progress i{width:8px;height:8px;border:1px solid var(--sh-ui-ink);border-radius:50%;transition:background .3s,transform .3s}
-sh-progress i.sh-done{background:var(--sh-ui-ink)}
-sh-progress i.sh-now{background:var(--sh-ui-accent);border-color:var(--sh-ui-accent);transform:scale(1.3)}
-@keyframes sh-shake{20%{transform:translateX(-5px) rotate(-1deg)}40%{transform:translateX(5px)}60%{transform:translateX(-3px)}80%{transform:translateX(2px)}}
-@keyframes sh-wobble{50%{transform:scale(1.03)}}
-`;
-
-/**
- * Host <-> game bridge, injected into the game: standard elements, a tiny procedural sound kit,
- * judgments, anchored code peeks and the final verdict.
- * Game -> host: { source: "slophop", type: "judge" | "peek" | "verdict" }.
- * Host -> game: { source: "slophop-host", type: "start" | "judged" | "mute" }.
- */
-function bridge(assets: { cover: string | null; sprites: string | null }) {
-  return `
-(function () {
-  var send = function (message) { message.source = "slophop"; parent.postMessage(message, "*"); };
-  var resolveStart, muted = false, ctx = null, pending = {}, verdictSent = false;
-  window.addEventListener("message", function (event) {
-    if (event.source !== parent || !event.data || event.data.source !== "slophop-host") return;
-    var d = event.data;
-    if (d.type === "start" && resolveStart) { resolveStart(); resolveStart = null; }
-    if (d.type === "mute") muted = !!d.muted;
-    if (d.type === "judged" && pending[d.key]) { pending[d.key](d.answer); delete pending[d.key]; }
-  });
-
-  function ac() {
-    if (!ctx) { var C = window.AudioContext || window.webkitAudioContext; if (!C) return null; ctx = new C(); }
-    if (ctx.state === "suspended") ctx.resume();
-    return ctx;
-  }
-  function tone(type, f1, f2, dur, vol, delay) {
-    var c = ac(); if (!c) return;
-    var t = c.currentTime + (delay || 0), o = c.createOscillator(), g = c.createGain();
-    o.type = type; o.frequency.setValueAtTime(f1, t);
-    if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + dur);
-    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g); g.connect(c.destination); o.start(t); o.stop(t + dur + 0.03);
-  }
-  function noise(dur, vol, freq, delay) {
-    var c = ac(); if (!c) return;
-    var t = c.currentTime + (delay || 0), b = c.createBuffer(1, Math.floor(c.sampleRate * dur), c.sampleRate), d = b.getChannelData(0);
-    for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-    var s = c.createBufferSource(), f = c.createBiquadFilter(), g = c.createGain();
-    s.buffer = b; f.type = "bandpass"; f.frequency.value = freq || 1200;
-    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    s.connect(f); f.connect(g); g.connect(c.destination); s.start(t);
-  }
-  var SFX = {
-    tap: function () { tone("sine", 660, 520, 0.06, 0.08); },
-    pick: function () { tone("triangle", 440, 720, 0.08, 0.08); },
-    drop: function () { tone("sine", 300, 140, 0.12, 0.1); },
-    snap: function () { noise(0.04, 0.12, 2400); tone("square", 900, 600, 0.04, 0.03); },
-    pop: function () { tone("sine", 500, 1100, 0.07, 0.09); },
-    whoosh: function () { noise(0.25, 0.08, 800); },
-    tick: function () { tone("square", 1400, 0, 0.02, 0.025); },
-    success: function () { tone("triangle", 523, 0, 0.12, 0.08); tone("triangle", 659, 0, 0.12, 0.08, 0.09); tone("triangle", 784, 0, 0.24, 0.08, 0.18); },
-    fail: function () { tone("sawtooth", 220, 140, 0.25, 0.04); },
-    buzz: function () { tone("square", 120, 0, 0.18, 0.04); },
-    crack: function () { noise(0.18, 0.16, 500); tone("sawtooth", 160, 60, 0.2, 0.03); },
-    coin: function () { tone("square", 988, 0, 0.06, 0.04); tone("square", 1319, 0, 0.16, 0.04, 0.06); }
-  };
-  function sfx(name) { if (muted) return; try { (SFX[name] || SFX.tap)(); } catch (e) {} }
-
-  var style = document.createElement("style");
-  style.textContent = ${JSON.stringify(UI_CSS)};
-  document.head.appendChild(style);
-
-  function define(name, setup) {
-    if (customElements.get(name)) return;
-    customElements.define(name, class extends HTMLElement {
-      connectedCallback() { if (this._ready) return; this._ready = true; setup(this); }
-      static get observedAttributes() { return ["state", "current", "total", "level"]; }
-      attributeChangedCallback() { if (this._ready && this._update) this._update(); }
-    });
-  }
-  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-
-  define("sh-promise", function (host) {
-    var text = host.textContent.trim(); host.textContent = "";
-    host.append(el("span", "sh-label", "Promise"), el("span", "sh-text", text));
-    host.setAttribute("role", "status");
-  });
-  define("sh-goal", function (host) {
-    var text = host.textContent.trim(); host.textContent = "";
-    var level = el("span", "sh-level"), body = el("span", "sh-text", text);
-    host.append(level, body);
-    host._update = function () { level.textContent = host.getAttribute("level") || ""; };
-    host._update();
-  });
-  define("sh-hint", function (host) {
-    var text = host.textContent.trim(); host.textContent = "";
-    var button = el("button", "", "?"), bubble = el("span", "sh-bubble", text);
-    button.setAttribute("aria-label", "Hint"); button.type = "button";
-    button.addEventListener("click", function () { host.toggleAttribute("open"); sfx("pop"); });
-    host.append(button, bubble);
-  });
-  define("sh-progress", function (host) {
-    host._update = function () {
-      host.textContent = "";
-      var total = Number(host.getAttribute("total")) || 0, current = Number(host.getAttribute("current")) || 0;
-      for (var i = 1; i <= total; i++) host.append(el("i", i < current ? "sh-done" : i === current ? "sh-now" : ""));
-    };
-    host._update();
-  });
-  define("sh-switch", function (host) {
-    var thumb = el("span", "sh-thumb"), a = el("button", "", host.getAttribute("old") || "Old"), b = el("button", "", host.getAttribute("new") || "New");
-    a.type = b.type = "button";
-    host.setAttribute("role", "group");
-    host.append(thumb, a, b);
-    function set(value, quiet) {
-      host.value = value;
-      a.setAttribute("aria-pressed", String(value === "old")); b.setAttribute("aria-pressed", String(value === "new"));
-      var on = value === "old" ? a : b;
-      thumb.style.left = on.offsetLeft + "px"; thumb.style.width = on.offsetWidth + "px";
-      if (!quiet) { sfx("snap"); host.dispatchEvent(new CustomEvent("change", { detail: { value: value }, bubbles: true })); }
-    }
-    a.addEventListener("click", function () { set("old"); });
-    b.addEventListener("click", function () { set("new"); });
-    requestAnimationFrame(function () { set(host.getAttribute("value") === "new" ? "new" : "old", true); });
-  });
-
-  var ASSETS = ${JSON.stringify(assets)};
-  window.SlopHop = {
-    started: new Promise(function (resolve) { resolveStart = resolve; setTimeout(resolve, 120000); }),
-    assets: ASSETS,
-    sprite: function (i) {
-      if (!ASSETS.sprites) return "";
-      i = Math.max(0, Math.min(3, Number(i) || 0));
-      return "background-image:url(" + ASSETS.sprites + ");background-size:200% 200%;background-repeat:no-repeat;background-position:" + (i % 2 ? "100%" : "0%") + " " + (i > 1 ? "100%" : "0%") + ";";
-    },
-    sfx: sfx,
-    promise: function (state) {
-      state = state === "broken" || state === "strained" ? state : "ok";
-      var nodes = document.querySelectorAll("sh-promise");
-      for (var i = 0; i < nodes.length; i++) {
-        if (state === "broken" && nodes[i].getAttribute("state") !== "broken") sfx("crack");
-        nodes[i].setAttribute("state", state);
-      }
-    },
-    peek: function (id, element, happened) {
-      if (typeof element === "string") { happened = element; element = null; }
-      var anchor = null;
-      if (element && element.getBoundingClientRect) {
-        var r = element.getBoundingClientRect();
-        anchor = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-      }
-      send({ type: "peek", id: String(id || ""), anchor: anchor, happened: String(happened || "").slice(0, 200) });
-    },
-    judge: function (kind, index, data) {
-      if (typeof kind === "number") { data = index; index = kind; kind = "case"; }
-      kind = kind === "fix" || kind === "tradeoff" ? kind : "case";
-      index = Number(index) || 0; data = data || {};
-      var key = kind === "fix" ? "fix" : kind + "-" + index;
-      return new Promise(function (resolve) {
-        pending[key] = resolve;
-        send({ type: "judge", key: key, outcome: String(data.outcome || "").slice(0, 500), brokePromise: !!data.brokePromise });
-        setTimeout(function () { if (pending[key]) { pending[key](null); delete pending[key]; } }, 600000);
-      });
-    },
-    verdict: function (data) {
-      if (verdictSent) return; verdictSent = true; data = data || {};
-      send({ type: "verdict", verdict: data.verdict === "breaks" ? "breaks" : "holds", evidence: String(data.evidence || "").slice(0, 2000), score: Number(data.score) || 0 });
-    }
-  };
-})();`;
-}
-
-/** Wraps the stored game with the three.js import map and the bridge. The route serves it with a sandboxing CSP header. */
-export function wrapGame(html: string, origin: string, puzzle: Puzzle) {
-  const assets = {
-    cover: puzzle.assets.cover ? `${origin}/api/puzzles/${puzzle.id}/assets/cover` : null,
-    sprites: puzzle.assets.sprites ? `${origin}/api/puzzles/${puzzle.id}/assets/sprites` : null,
-  };
-  const head = `
-<script type="importmap">{"imports":{"three":"${THREE_BASE}build/three.module.js","three/addons/":"${THREE_BASE}examples/jsm/"}}</script>
-<script>${bridge(assets)}</script>`;
-  const wrapped = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (match) => `${match}${head}`) : `<!doctype html><html><head>${head}</head><body>${html}</body></html>`;
-  const csp = [
-    "sandbox allow-scripts",
-    "default-src 'none'",
-    `script-src 'unsafe-inline' ${THREE_BASE}`,
-    "style-src 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src https://fonts.gstatic.com",
-    `img-src data: blob: ${origin}`,
-    "media-src data: blob:",
-    "connect-src 'none'",
-  ].join("; ");
-  return { html: wrapped, csp };
 }
