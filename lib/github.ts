@@ -64,13 +64,38 @@ const SEARCHES = {
     'limit in:title author:app/copilot-swe-agent is:pr is:public is:merged',
     'total in:title "chatgpt.com/codex/tasks" in:body is:pr is:public is:merged',
   ],
-  /** Looks: layout, CSS, small screens. */
+  /** Flows: bigger business processes (statuses, refunds, subscriptions, approvals). */
+  flow: [
+    'refund in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'subscription in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'checkout in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'workflow in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'approval in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'status in:title author:app/copilot-swe-agent is:pr is:public is:merged',
+    'order in:title "chatgpt.com/codex/tasks" in:body is:pr is:public is:merged',
+  ],
+  /** AI guardrails: injection defences, safety filters, tool permissions, output checks, redaction. */
+  ai: [
+    'guardrail in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'injection in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'moderation in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'safety in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'sanitize in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'redact in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'prompt in:title author:app/copilot-swe-agent is:pr is:public is:merged',
+  ],
+  /** UX: layout, CSS, small screens, terminals, and hardware (buttons, LEDs, displays). */
   visual: [
     'layout in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
     'css in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
     'mobile in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
     'layout in:title author:app/copilot-swe-agent is:pr is:public is:merged',
     'overflow in:title "Made with Cursor" in:body is:pr is:public is:merged',
+    'ux in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'button in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'led in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'firmware in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'display in:title author:app/copilot-swe-agent is:pr is:public is:merged',
   ],
 };
 
@@ -89,7 +114,8 @@ export function madeWithTool(pull: { body: string | null; user: { login: string 
 
 const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php|cs|swift|c|cc|cpp|h|css|scss|sass|less|vue|svelte|html|astro)$/i;
 const NOISE_FILE = /(lock|\.min\.|snap|generated|dist\/|vendor\/|__snapshots__|\.d\.ts$)/i;
-const MAX_DIFF_CHARS = 9_000;
+// Flows read bigger business-logic changes, so a bit more diff fits (Gemini handles it fine).
+const MAX_DIFF_CHARS = 14_000;
 const MAX_CONTEXT_CHARS = 6_000;
 const CONTEXT_FILES = 2;
 const CONTEXT_PADDING = 25;
@@ -127,13 +153,16 @@ export function parsePullUrl(input: string) {
 function logicScore(files: PullFile[]) {
   const code = files.filter((file) => CODE_FILE.test(file.filename) && !NOISE_FILE.test(file.filename) && file.patch);
   const changed = code.reduce((sum, file) => sum + file.additions + file.deletions, 0);
-  if (!code.length || changed < 6 || changed > 500) return 0;
+  // Up to 1,500 changed lines: big enough for business-process changes (FLOW); ranking still prefers small for the rest.
+  if (!code.length || changed < 6 || changed > 1500) return 0;
   const patch = code.map((file) => file.patch).join("\n");
   const count = (pattern: RegExp) => (patch.match(pattern) ?? []).length;
   const branches = count(/^[+-].*(\bif\b|\belse\b|\?|&&|\|\||\bswitch\b|\bcase\b|[<>]=?|===?|!==?|\bmatch\b)/gm);
   const maths = count(/^[+-].*(Math\.|\bround|\bfloor|\bceil|\bclamp|\bmin\(|\bmax\(|\d\.\d|\d+\s*[*/%]|[*/%]\s*\d)/gm);
   const looks = count(/^[+-].*(\b(margin|padding|width|height|gap|flex|grid|font-size|color|background|overflow|wrap|z-index|display|position)\b|\d+(px|rem|em|vh|vw|%)\b|@media)/gm);
-  return branches * 10 + maths * 6 + looks * 6 + Math.min(changed, 120);
+  const flows = count(/^[+-].*\b(status|state|transition|workflow|approve[ds]?|refund|cancel(?:led)?|subscription|pending|lifecycle)\b/gim);
+  const guards = count(/^[+-].*\b(prompt|llm|guardrail|moderat\w*|inject\w*|sanitiz\w*|redact\w*|safety|jailbreak|tool_?call|allowlist|denylist)\b/gim);
+  return branches * 10 + maths * 6 + looks * 6 + flows * 5 + guards * 5 + Math.min(changed, 120);
 }
 
 function buildDiff(files: PullFile[]) {
@@ -361,7 +390,8 @@ export async function findCandidatePullRequests(count = 50, exclude: Promise<Set
   // All require an approved review: that lands in real team projects (~30% with 50+ stars vs ~5% without).
   const shuffled = (list: string[]) => [...list].sort(() => Math.random() - 0.5);
   // Newest first (sort:updated-desc; without it GitHub returns "best match", which barely changes), each in a random window.
-  const queries = [...shuffled(SEARCHES.general).slice(0, 2), shuffled(SEARCHES.numeric)[0], shuffled(SEARCHES.visual)[0]].map(
+  // One general search plus one per kind (numbers, UX, flow, AI): five in all, still two at a time.
+  const queries = [shuffled(SEARCHES.general)[0], shuffled(SEARCHES.numeric)[0], shuffled(SEARCHES.visual)[0], shuffled(SEARCHES.flow)[0], shuffled(SEARCHES.ai)[0]].map(
     (query) => `${query} review:approved ${mergedWindow()} sort:updated-desc`,
   );
   const searched = await settleLimited(queries, 2, searchPulls);

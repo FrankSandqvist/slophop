@@ -9,7 +9,18 @@ Every puzzle is built from one real, public GitHub pull request, cut down to one
 answers and votes can be crowdsourced per case. Three kinds ("families", `lib/families.ts` for the last two):
 - **logic** — conditions decide an outcome (truth table).
 - **numeric** — a calculation over one real input (price, fee, rounding, duration...), sampled by running Python.
-- **visual** — how a small screen looks before/after in 3-4 situations, described as shapes and drawn by our `MockScreen`.
+- **visual** (badge **UX**) — what a person sees or experiences, before/after in 3-4 situations: a screen, a terminal, or a
+  physical device (frame `device`; raised `button` and round `led` shapes alongside box/text/line), described as shapes and
+  drawn by our `MockScreen`. The internal id stays `visual`.
+- **flow** — a business process (`lib/flows.ts`): Gemini describes the states, events and arrows before and after, plus 4-8
+  scenarios; our code simulates every scenario through both maps (`runFlow`), so answers are exact (no Python). Found via
+  process-word searches (refund, subscription, checkout, workflow, approval, status, order), PRs up to 1,500 changed lines,
+  and its own Decisions score (`flowScore`: size doesn't count against it, "is it a process" does). Badge: FLOW.
+- **ai** (badge **AI**, `lib/ai.ts`) — the guardrails around an AI feature (prompt-injection defences, safety/moderation
+  filters, agent tool permissions, output checks, redaction, hand-offs to a person). Gemini mirrors Red's and Green's guard in
+  Python and runs 6-10 concrete, HARMLESS example inputs (messages, tool calls, model outputs, documents) through both; a
+  backstop drops anything that looks like a real secret. Found via guardrail/injection/moderation/safety/sanitize/redact
+  searches. Step count = 2 + changed examples (3-5).
 - **mixed** — when Gemini Decisions says a PR clearly fits two kinds (`secondFamily`: both fits ≥ 0.3), both are modelled in
   parallel (no extra wait; if the second fails the puzzle stays single-kind). `families` lists both; their data, rules
   (`mixedRules`, up to 3 lines each) and steps (`interleaveRounds`, max 5) are combined. Badge: e.g. MATH + LAYOUT.
@@ -74,7 +85,8 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
   and SlopHop explain the game on the top screen while a How to play card in the menu lights up step by step (including making
   your own puzzle from a real AI-made PR); "?" replays it.
 - Play (`components/PlayDS.tsx`): the cutscene, if the puzzle has one (`components/Fmv.tsx`: drawn into a ~256px canvas with
-  the stage's dither + 15-bit colour, whole-number scale, its lines typed into the text box at their times, tap to skip), then intro dialogue (project, where the code lives, the scene, the change, Red's and Green's lines,
+  the stage's dither + 15-bit colour, whole-number scale, a PS1 NOW LOADING screen with Red and Green hopping and a
+  segmented bar of the real download progress until the first frame, its lines typed into the text box at their times, tap to skip), then intro dialogue (project, where the code lives, the scene, the change, Red's and Green's lines,
   each condition explained, the decision) with the PR card and the rulebooks as speech bubbles (Red's head + his old rules,
   Green's head + his new ones; changed lines tagged NEW / GONE, unchanged ones dimmed); rounds describe their case as a story built from each value's
   `story` phrase; a "?" glossary lists every condition and outcome →
@@ -98,13 +110,24 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
   for `who`) above a case box tagged THE CASE. If a step would overflow, PlayDS adds `.dense` (tighter padding), then `.no-rules`
   (the bubble becomes a one-line "tap to read" strip), then `.denser` (drops the strip and `.can-hide`, e.g. one spare pattern row).
   `/play/{id}?round=N` jumps to step N; `&qa` logs whether the step overflows (`&qa=answer` also auto-answers).
-- Kind badges (`components/KindBadge.tsx`, `FAMILY_BADGES`): LOGIC / MATH / LAYOUT (mixed: both) on the menu and PR card.
+- Kind badges (`components/KindBadge.tsx`, `FAMILY_BADGES`): LOGIC (ink) / MATH (yellow) / UX (white) / FLOW (sky blue) / AI (lavender)
+  (mixed: both) on the menu and PR card. The menu's kind row (ALL / LOGIC / MATH / UX / FLOW / AI) filters the list and sets what
+  "+ New puzzle" makes: the choice is sent as `family`, and `chooseCandidate` then takes the PR that best fits that kind.
 - Generation runs under `after()` in `POST /api/puzzles`, so leaving the page doesn't stop it; `lib/jobs.ts` keeps a
   `jobs/{id}.json` marker while it runs, shown in the menu as "Being made…" with a "Bored of waiting?" hint (the list
   refreshes every 10s until it lands).
 - Numeric steps (`components/Families.tsx`): `num-predict` (key Green's/Red's result into a Brain Age style `Keypad`),
   `num-diff` (how much more Green gives), `num-split` / `num-reach` (drag a marker along the `NumberLine` pixel chart: where
   Green starts to differ, where it first hits a target; Green's line appears after answering).
+- Flow steps, on the `FlowMap` (SVG in the 16px UI font, top to bottom: states as boxes, bad endings shaded, arrows labelled
+  with events; per-gap label packing so labels never overlap, with a second staggered line only when needed; tap states and
+  arrow labels): `flow-trace` (tap where a story ends on Green's or Red's map; the path lights up), `flow-change` (tap the arrow
+  only one side has), `flow-dead` (tap the step that can't be reached any more, or only now), `flow-break` (which story ends
+  badly with Green). Unreachable states are dropped so the map stays clean.
+- AI steps (`components/Families.tsx`): `ai-gate` (an input arrives: what does Green's or Red's guard do?), `ai-should`
+  (intent first: pick what SHOULD happen, then see what Red and Green do; no wrong answer, agreeing with Green counts, and the
+  gap is the alignment signal), `ai-slip` (red-team it: which input gets past Green's guard?), `ai-diff` (which input does
+  Green treat differently from Red?).
 - Visual steps: `vis-which` (two mock screens: which is Green's?) and `vis-spot` (tap what changed in Green's picture; then it
   flips between before and after with the change outlined). One step per situation (seeing both gives the next answer away).
 - World (`lib/world.ts`, `components/World.tsx`): "how does this affect the world". From the pick on, Hydrogen with the

@@ -1,5 +1,6 @@
 import { after } from "next/server";
 import { createPuzzle, type ProgressEvent } from "@/lib/puzzles";
+import type { PuzzleFamily } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,8 +11,10 @@ export const maxDuration = 300;
  * it finishes (and lands in the menu) even if the player leaves the page: the stream just stops reporting.
  */
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => ({}))) as { prUrl?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { prUrl?: unknown; family?: unknown };
   const prUrl = typeof body.prUrl === "string" && body.prUrl.trim() ? body.prUrl.trim() : undefined;
+  // The kind the player picked (or none: random).
+  const family = typeof body.family === "string" && ["logic", "numeric", "visual", "flow", "ai"].includes(body.family) ? (body.family as PuzzleFamily) : undefined;
   const encoder = new TextEncoder();
   let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   const stream = new ReadableStream<Uint8Array>({
@@ -30,7 +33,7 @@ export async function POST(request: Request) {
       controller = null;
     }
   };
-  const job = createPuzzle({ prUrl, emit })
+  const job = createPuzzle({ prUrl, family, emit })
     .then((puzzle) => emit({ type: "done", puzzle }))
     .catch((error: unknown) => {
       console.error("Puzzle generation failed", error);

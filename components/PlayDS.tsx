@@ -4,11 +4,11 @@ import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MascotKind, MascotMood } from "@/lib/mascot";
 import { playLoop, setMuted, sfx } from "@/lib/sound";
-import { caseLabel, formatNumber, numericRow, outcome, pointAt, roundTo, storyOf, valueLabel, visualRow, voteRow, type Puzzle, type PuzzleRow, type Round, type VoteTally } from "@/lib/types";
+import { aiRow, caseLabel, flowKey, flowRow, flowStory, formatNumber, numericRow, outcome, pointAt, roundTo, storyOf, valueLabel, visualRow, voteRow, type Puzzle, type PuzzleRow, type Round, type VoteTally } from "@/lib/types";
 import { Fmv } from "./Fmv";
 import { KindBadge } from "./KindBadge";
 import { starCount, WorldCard } from "./World";
-import { Keypad, NumberCase, NumberLine, NumberResults, VisualSpot, VisualWhich } from "./Families";
+import { AiGate, AiInput, AiPickInput, AiResults, AiShould, FlowBreak, FlowChange, FlowDead, FlowEnds, FlowStory, FlowTrace, Keypad, NumberCase, NumberLine, NumberResults, VisualSpot, VisualWhich } from "./Families";
 import { DSShell, TextBox, type Line } from "./DS";
 import { PS1Stage, type StageState } from "./PS1Stage";
 import {
@@ -51,6 +51,10 @@ function claimText(puzzle: Puzzle, round: Extract<Round, { kind: "claim" }>) {
 }
 
 const stateOf = (puzzle: Puzzle, id: string) => puzzle.visual?.states.find((state) => state.id === id);
+const exampleOf = (puzzle: Puzzle, id: string) => puzzle.ai?.examples.find((example) => example.id === id);
+const scenarioOf = (puzzle: Puzzle, id: string) => puzzle.flow?.scenarios.find((scenario) => scenario.id === id);
+/** The story a flow step votes on: a scenario where Red and Green end differently, else the first. */
+const flowVoteScenario = (puzzle: Puzzle) => puzzle.flow?.scenarios.find((scenario) => scenario.old[scenario.old.length - 1] !== scenario.new[scenario.new.length - 1]) ?? puzzle.flow?.scenarios[0];
 
 /** The case a step was about, as a compact recap above its explainer: the values and what each of them did. */
 function CaseRecap({ puzzle, round, row }: { puzzle: Puzzle; round: Round; row: PuzzleRow }) {
@@ -60,6 +64,26 @@ function CaseRecap({ puzzle, round, row }: { puzzle: Puzzle; round: Round; row: 
       <>
         <NumberCase model={puzzle.numeric} x={x} />
         <NumberResults model={puzzle.numeric} x={x} />
+      </>
+    );
+  }
+  if (puzzle.ai && row.key.startsWith("ai~")) {
+    const example = exampleOf(puzzle, row.key.slice(3));
+    if (!example) return null;
+    return (
+      <>
+        <AiInput example={example} />
+        <AiResults model={puzzle.ai} example={example} />
+      </>
+    );
+  }
+  if (puzzle.flow && row.key.startsWith("flow~")) {
+    const scenario = scenarioOf(puzzle, row.key.slice(5));
+    if (!scenario) return null;
+    return (
+      <>
+        <FlowStory model={puzzle.flow} scenario={scenario} />
+        <FlowEnds model={puzzle.flow} scenario={scenario} />
       </>
     );
   }
@@ -103,6 +127,11 @@ const overflows = (panel: HTMLElement) => contentBottom(panel) > panel.clientHei
 function rulesFor(round: Round): Array<"old" | "new"> {
   if (["who", "num-diff", "num-split", "vis-which", "vis-spot"].includes(round.kind)) return ["old", "new"];
   if (round.kind === "num-predict" && round.side === "old") return ["old"];
+  if (round.kind === "flow-change" || round.kind === "flow-dead") return ["old", "new"];
+  if (round.kind === "flow-trace") return [round.side];
+  if (round.kind === "ai-gate") return [round.side];
+  if (round.kind === "ai-diff") return ["old", "new"];
+  if (round.kind === "ai-slip") return ["new"];
   if (round.kind === "predict" && round.side === "old") return ["old"];
   return ["new"];
 }
@@ -140,6 +169,22 @@ function goalOf(puzzle: Puzzle, round: Round) {
       return "Which picture is Green's?";
     case "vis-spot":
       return "Tap what changed in Green's picture";
+    case "flow-trace":
+      return round.side === "new" ? "Tap where Green ends this story" : "Tap where Red ended this story";
+    case "flow-change":
+      return round.side === "new" ? "Tap the arrow Green added" : "Tap the arrow Green dropped";
+    case "flow-dead":
+      return round.mode === "lost" ? "Tap the step you can't reach now" : "Tap the step you can only reach now";
+    case "flow-break":
+      return "Which story ends badly with Green?";
+    case "ai-gate":
+      return round.side === "new" ? "What does Green's guard do with it?" : "What did Red's guard do with it?";
+    case "ai-should":
+      return "What SHOULD happen to this?";
+    case "ai-slip":
+      return "Which one gets past Green's guard?";
+    case "ai-diff":
+      return "Which one does Green treat differently?";
   }
 }
 
@@ -192,6 +237,33 @@ function roundLine(puzzle: Puzzle, round: Round): Line {
       return { who: "del", text: `Picture it: ${stateOf(puzzle, round.state)?.story ?? ""}. One of these is me, one is Green. Which is Green's?` };
     case "vis-spot":
       return { who: "add", text: `Picture it: ${stateOf(puzzle, round.state)?.story ?? ""}. This is me now. Tap the part that changed.` };
+    case "flow-trace": {
+      const scenario = scenarioOf(puzzle, round.scenario);
+      const story = scenario && puzzle.flow ? flowStory(puzzle.flow, scenario) : "";
+      return round.side === "new"
+        ? { who: "add", text: `Picture it: ${story}. Follow my map: where do you end up? Tap it.` }
+        : { who: "del", text: `Picture it: ${story}. Before the change it was my map. Where did you end up?` };
+    }
+    case "flow-change":
+      return round.side === "new"
+        ? { who: "add", text: "Here's my map. One arrow is new or goes somewhere new. Tap its label." }
+        : { who: "del", text: "Here's my old map. One of my arrows is gone with Green. Tap its label." };
+    case "flow-dead":
+      return round.mode === "lost"
+        ? { who: "del", text: "On Green's map, one step can't be reached any more. Which one?" }
+        : { who: "add", text: "On my map, one step can be reached that couldn't before. Which one?" };
+    case "flow-break":
+      return { who: "del", text: "Let's break Green. Which of these stories ends somewhere bad?" };
+    case "ai-gate":
+      return round.side === "new"
+        ? { who: "add", text: `This just arrived at ${puzzle.ai?.guard ?? "the guard"}. Use my rules: what do I do with it?` }
+        : { who: "del", text: "Same kind of input, before the change. What did my old guard do with it?" };
+    case "ai-should":
+      return { who: "add", text: "Forget our rules for a second. What SHOULD happen to this one? Then we'll show you what we actually do." };
+    case "ai-slip":
+      return { who: "del", text: "Think like an attacker. Which of these gets past Green's guard?" };
+    case "ai-diff":
+      return { who: "add", text: "Red and I agree on most of these. Which one do I handle differently?" };
   }
 }
 
@@ -287,6 +359,14 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
         "num-reach": () => String(puzzle.numeric?.points[0].x ?? 0),
         "vis-which": () => "a",
         "vis-spot": () => "none",
+        "flow-trace": () => puzzle.flow?.start ?? "",
+        "flow-change": () => "none",
+        "flow-dead": () => puzzle.flow?.start ?? "",
+        "flow-break": () => (round.kind === "flow-break" ? round.options[0] : ""),
+        "ai-gate": () => puzzle.ai?.outcomes[0].id ?? "",
+        "ai-should": () => puzzle.ai?.outcomes[0].id ?? "",
+        "ai-slip": () => (round.kind === "ai-slip" ? round.options[0] : ""),
+        "ai-diff": () => (round.kind === "ai-diff" ? round.options[0] : ""),
       };
       window.setTimeout(() => answer(first[round.kind]()), 300);
     }
@@ -467,6 +547,57 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
         const correct = state.changed.includes(choice);
         return finish(visualRow(state), correct, correct ? speak("Sharp eyes. That's what changed.") : speak("Not that bit. Watch it flip: the change is outlined.", "del"));
       }
+      case "ai-gate": {
+        const example = exampleOf(puzzle, round.example)!;
+        const truth = round.side === "new" ? example.new : example.old;
+        const label = puzzle.ai!.outcomes.find((outcome) => outcome.id === truth)?.label ?? truth;
+        const correct = choice === truth;
+        return finish(aiRow(example), correct, correct ? speak(`Right: ${label}.`, round.side === "new" ? "add" : "del") : speak(`Not quite: ${label}.`, "del"));
+      }
+      case "ai-should": {
+        // No wrong answer: agreeing with Green counts, and every intent is exactly the signal we want from the crowd.
+        const example = exampleOf(puzzle, round.example)!;
+        const agrees = choice === example.new;
+        return finish(aiRow(example), agrees, agrees ? speak("You and I agree. That's exactly what I do now.") : speak("Interesting: that's not what Green does. Is Green right? Vote below.", "del"));
+      }
+      case "ai-slip":
+      case "ai-diff": {
+        const example = exampleOf(puzzle, round.answer)!;
+        const correct = choice === round.answer;
+        return finish(
+          aiRow(example),
+          correct,
+          correct
+            ? speak(round.kind === "ai-slip" ? "That one gets through. Should it? Vote below." : "Yes, that's the one I handle differently.", round.kind === "ai-slip" ? "del" : "add")
+            : speak("Not that one. The lit card is the answer.", "del"),
+        );
+      }
+      case "flow-trace": {
+        const flow = puzzle.flow!;
+        const scenario = scenarioOf(puzzle, round.scenario)!;
+        const path = round.side === "new" ? scenario.new : scenario.old;
+        const truth = path[path.length - 1];
+        const label = flow.states.find((state) => state.id === truth)?.label ?? truth;
+        const correct = choice === truth;
+        return finish(flowRow(scenario), correct, correct ? speak(`Right: you end at ${label}.`, round.side === "new" ? "add" : "del") : speak(`You end at ${label}. Follow the lit path.`, "del"));
+      }
+      case "flow-change": {
+        const flow = puzzle.flow!;
+        const other = new Set(flow[round.side === "new" ? "old" : "new"].map(flowKey));
+        const correct = flow[round.side].some((transition) => !other.has(flowKey(transition)) && flowKey(transition) === choice);
+        return finish(flowRow(flowVoteScenario(puzzle)!), correct, correct ? speak("That's the one. That's the change in the process.") : speak("Not that arrow. The lit ones are what changed.", "del"));
+      }
+      case "flow-dead": {
+        const flow = puzzle.flow!;
+        const label = flow.states.find((state) => state.id === round.answer)?.label ?? round.answer;
+        const correct = choice === round.answer;
+        return finish(flowRow(flowVoteScenario(puzzle)!), correct, correct ? speak(`Yes: ${label}.`, round.mode === "lost" ? "del" : "add") : speak(`It's ${label}. Check the arrows into it.`, "del"));
+      }
+      case "flow-break": {
+        const scenario = scenarioOf(puzzle, round.answer)!;
+        const correct = choice === round.answer;
+        return finish(flowRow(scenario), correct, correct ? speak("You broke Green! Is that okay? Vote below.", "del") : speak("That one ends fine. The lit card is the bad one.", "del"));
+      }
       case "claim": {
         const correct = (choice === "true") === round.truth;
         const row = voteRow(puzzle, round, puzzle.table.find((entry) => entry.values[round.input] === round.value))!;
@@ -644,6 +775,37 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
               )}
               {round.kind === "vis-spot" && puzzle.visual && stateOf(puzzle, round.state) && (
                 <VisualSpot key={phase.index} model={puzzle.visual} state={stateOf(puzzle, round.state)!} picked={picked} onPick={answer} />
+              )}
+              {round.kind === "ai-gate" && puzzle.ai && exampleOf(puzzle, round.example) && (
+                <AiGate key={phase.index} model={puzzle.ai} example={exampleOf(puzzle, round.example)!} side={round.side} picked={picked} onPick={answer} />
+              )}
+              {round.kind === "ai-should" && puzzle.ai && exampleOf(puzzle, round.example) && (
+                <AiShould key={phase.index} model={puzzle.ai} example={exampleOf(puzzle, round.example)!} picked={picked} onPick={answer} />
+              )}
+              {(round.kind === "ai-slip" || round.kind === "ai-diff") && puzzle.ai && (
+                <AiPickInput
+                  key={phase.index}
+                  model={puzzle.ai}
+                  options={round.options.map((id) => exampleOf(puzzle, id)).filter((example): example is NonNullable<typeof example> => Boolean(example))}
+                  answer={round.answer}
+                  showRed={round.kind === "ai-diff"}
+                  picked={picked}
+                  onPick={answer}
+                />
+              )}
+              {round.kind === "flow-trace" && puzzle.flow && scenarioOf(puzzle, round.scenario) && (
+                <FlowTrace key={phase.index} model={puzzle.flow} scenario={scenarioOf(puzzle, round.scenario)!} side={round.side} picked={picked} onPick={answer} />
+              )}
+              {round.kind === "flow-change" && puzzle.flow && <FlowChange key={phase.index} model={puzzle.flow} side={round.side} picked={picked} onPick={answer} />}
+              {round.kind === "flow-dead" && puzzle.flow && <FlowDead key={phase.index} model={puzzle.flow} answer={round.answer} picked={picked} onPick={answer} />}
+              {round.kind === "flow-break" && puzzle.flow && (
+                <FlowBreak
+                  model={puzzle.flow}
+                  options={round.options.map((id) => scenarioOf(puzzle, id)).filter((scenario): scenario is NonNullable<typeof scenario> => Boolean(scenario))}
+                  answer={round.answer}
+                  picked={picked}
+                  onPick={answer}
+                />
               )}
               {round.kind === "claim" && (
                 <>

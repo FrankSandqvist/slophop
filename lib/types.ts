@@ -57,7 +57,25 @@ export type Round =
   /** Tap the part of Green's picture that changed. */
   | { kind: "vis-spot"; state: string }
   /** Two pictures of the same situation: which one is Green's? `greenFirst` says which side it's on. */
-  | { kind: "vis-which"; state: string; greenFirst: boolean };
+  | { kind: "vis-which"; state: string; greenFirst: boolean }
+  /* Flows: a process (states and the events that move between them), before and after. Played on the flow map. */
+  /** A story of events: tap where it ends on Green's (or Red's) map. */
+  | { kind: "flow-trace"; scenario: string; side: "new" | "old" }
+  /** Tap the arrow that only one side has (Green added or rerouted it, or Red had it and it's gone). */
+  | { kind: "flow-change"; side: "new" | "old" }
+  /** Tap the state that can't be reached any more (`lost`) or can only be reached now (`gained`). */
+  | { kind: "flow-dead"; mode: "lost" | "gained"; answer: string }
+  /** Which of these event stories ends somewhere bad with Green? */
+  | { kind: "flow-break"; options: string[]; answer: string }
+  /* AI guards: concrete example inputs through Red's and Green's guard. */
+  /** An input arrives: with Green's (or Red's) guard, what happens to it? */
+  | { kind: "ai-gate"; example: string; side: "new" | "old" }
+  /** Intent first: decide what SHOULD happen, then see what Green actually does (no wrong answer; agreement is the signal). */
+  | { kind: "ai-should"; example: string }
+  /** Red-team it: which of these gets through Green's guard? */
+  | { kind: "ai-slip"; options: string[]; answer: string }
+  /** Which of these does Green treat differently from Red? */
+  | { kind: "ai-diff"; options: string[]; answer: string };
 
 /** A company behind or using the project. `role`: maker (builds it) or user (runs it). Brand fields come from context.dev. */
 export type WorldCompany = {
@@ -79,10 +97,10 @@ export type World = { headline: string; reach: string; impact: string; companies
 export type Explainer = { red: string; green: string; why: string };
 
 /** What a puzzle is about: a decision (logic), a calculation (numeric) or how something looks (visual). */
-export type PuzzleFamily = "logic" | "numeric" | "visual";
+export type PuzzleFamily = "logic" | "numeric" | "visual" | "flow" | "ai";
 
-/** The kind badge shown on puzzles: LOGIC, MATH or LAYOUT. Older puzzles without a family are logic. */
-export const FAMILY_BADGES: Record<PuzzleFamily, string> = { logic: "LOGIC", numeric: "MATH", visual: "LAYOUT" };
+/** The kind badge shown on puzzles: LOGIC, MATH, UX or FLOW ("visual" is UX). Older puzzles without a family are logic. */
+export const FAMILY_BADGES: Record<PuzzleFamily, string> = { logic: "LOGIC", numeric: "MATH", visual: "UX", flow: "FLOW", ai: "AI" };
 
 /** Numbers: Red's and Green's calculation over one real input, sampled by Gemini running Python. */
 export type NumericModel = {
@@ -95,11 +113,29 @@ export type NumericModel = {
 };
 
 /** One element of a mock screen, in frame pixels. Drawn by our own MockScreen in the pixel style. */
-export type MockShape = { id: string; kind: "box" | "text" | "line"; x: number; y: number; w: number; h: number; fill?: string; stroke?: string; text?: string; color?: string };
+export type MockShape = { id: string; kind: "box" | "text" | "line" | "button" | "led"; x: number; y: number; w: number; h: number; fill?: string; stroke?: string; text?: string; color?: string };
 /** One situation (a narrow phone, a very long name...): the same screen before (Red) and after (Green). `changed` = ids that differ. */
 export type VisualState = { id: string; label: string; story: string; before: MockShape[]; after: MockShape[]; changed: string[] };
 /** Looks: a small screen in a few situations. Gemini describes it as data; we draw it. */
 export type VisualModel = { frame: { w: number; h: number }; states: VisualState[] };
+
+/** What an AI guard can do with an input; `letsThrough` = the input goes on to the model, tool or user. */
+export type AiOutcome = { id: string; label: string; tone: Tone; letsThrough: boolean };
+/** A concrete, harmless example input, with what Red's (old) and Green's (new) guard did with it (computed by running Python). */
+export type AiExample = { id: string; kind: "message" | "tool call" | "model output" | "document"; text: string; note: string; old: string; new: string };
+/** AI guards: what's being guarded, the possible outcomes, and the examples run through both guards. */
+export type AiModel = { guard: string; outcomes: AiOutcome[]; examples: AiExample[] };
+
+/** A step in a process ("Paid", "Shipped"); `tone` says whether ending there is good, bad or neither. */
+export type FlowStateDef = { id: string; label: string; tone: Tone; explain: string };
+/** Something that happens ("pay", "courier loses it"); `story` is a second-person phrase for scenario stories. */
+export type FlowEvent = { id: string; label: string; story: string };
+/** From state + event → next state. Events with no arrow from the current state are ignored (nothing happens). */
+export type FlowTransition = { from: string; event: string; to: string };
+/** A sequence of events, with the path and end state under Red's map (old) and Green's (new), computed by our code. */
+export type FlowScenario = { id: string; events: string[]; old: string[]; new: string[] };
+/** Flows: a process before and after the change, described by Gemini, simulated by us. */
+export type FlowModel = { start: string; states: FlowStateDef[]; events: FlowEvent[]; old: FlowTransition[]; new: FlowTransition[]; scenarios: FlowScenario[] };
 
 export type Puzzle = {
   format: number;
@@ -130,6 +166,8 @@ export type Puzzle = {
   table: PuzzleRow[];
   numeric?: NumericModel;
   visual?: VisualModel;
+  flow?: FlowModel;
+  ai?: AiModel;
   rounds: Round[];
   /** One per round (same order): why Red and Green did what they did in that exact case. Shown after each reveal. */
   explainers?: Explainer[];
@@ -269,5 +307,70 @@ export function caseLabel(puzzle: Puzzle, key: string) {
     return `${input.label} ${formatNumber(x, input.unit)}${point ? ` → Green ${formatNumber(point.new, output.unit, output.decimals)}, Red ${formatNumber(point.old, output.unit, output.decimals)}` : ""}`;
   }
   if (key.startsWith("state~") && puzzle.visual) return puzzle.visual.states.find((state) => `state~${state.id}` === key)?.label ?? key;
+  if (key.startsWith("ai~") && puzzle.ai) {
+    const example = puzzle.ai.examples.find((entry) => `ai~${entry.id}` === key);
+    const label = (id?: string) => puzzle.ai?.outcomes.find((entry) => entry.id === id)?.label ?? id;
+    return example ? `"${example.text.slice(0, 60)}" → Green: ${label(example.new)}` : key;
+  }
+  if (key.startsWith("flow~") && puzzle.flow) {
+    const scenario = puzzle.flow.scenarios.find((entry) => `flow~${entry.id}` === key);
+    if (!scenario) return key;
+    const label = (id: string) => puzzle.flow?.states.find((state) => state.id === id)?.label ?? id;
+    return `${flowStory(puzzle.flow, scenario)} → Green: ${label(scenario.new[scenario.new.length - 1])}`;
+  }
   return null;
+}
+
+/* ---------- Flows: simulation and vote rows ---------- */
+
+export const flowKey = (transition: FlowTransition) => `${transition.from}|${transition.event}|${transition.to}`;
+
+/** Runs events through a map from `start`: each event follows its arrow from the current state, or is ignored. */
+export function runFlow(start: string, transitions: FlowTransition[], events: string[]) {
+  const next = new Map(transitions.map((transition) => [`${transition.from}|${transition.event}`, transition.to]));
+  const path = [start];
+  for (const event of events) {
+    const to = next.get(`${path[path.length - 1]}|${event}`);
+    if (to) path.push(to);
+  }
+  return path;
+}
+
+/** States reachable from `start` in a map. */
+export function reachable(start: string, transitions: FlowTransition[]) {
+  const seen = new Set([start]);
+  const queue = [start];
+  while (queue.length) {
+    const state = queue.shift()!;
+    for (const transition of transitions) {
+      if (transition.from === state && !seen.has(transition.to)) {
+        seen.add(transition.to);
+        queue.push(transition.to);
+      }
+    }
+  }
+  return seen;
+}
+
+/** A scenario as a story: "you pay, then the courier loses the parcel, then you ask for a refund". */
+export function flowStory(model: FlowModel, scenario: FlowScenario) {
+  return scenario.events
+    .map((id, index) => {
+      const event = model.events.find((entry) => entry.id === id);
+      const phrase = event?.story || event?.label || id;
+      return index === 0 ? phrase : `then ${phrase}`;
+    })
+    .join(", ");
+}
+
+/** A vote row for a flow puzzle: one scenario, with where Red and Green end. */
+export function flowRow(scenario: FlowScenario): PuzzleRow {
+  return { key: `flow~${scenario.id}`, values: scenario.events, old: scenario.old[scenario.old.length - 1], new: scenario.new[scenario.new.length - 1] };
+}
+
+/* ---------- AI guards: vote rows ---------- */
+
+/** A vote row for an AI puzzle: one example input, with what Red's and Green's guard did with it. */
+export function aiRow(example: AiExample): PuzzleRow {
+  return { key: `ai~${example.id}`, values: [example.id], old: example.old, new: example.new };
 }

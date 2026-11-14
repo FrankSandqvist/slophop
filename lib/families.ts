@@ -228,13 +228,17 @@ export function buildNumericRounds(model: NumericModel): Round[] {
 /* ---------- Looks ---------- */
 
 /** Frame sizes in mock pixels: our pixel font is 3x5 (4px per letter, 6px per line). */
-export const FRAMES = { wide: { w: 128, h: 80 }, phone: { w: 72, h: 128 } } as const;
+export const FRAMES = { wide: { w: 128, h: 80 }, phone: { w: 72, h: 128 }, device: { w: 112, h: 88 } } as const;
 
 const shapeSchema = {
   type: "object",
   properties: {
     id: str("Stable id for this element, the same in before and after (e.g. 'title', 'save-button')."),
-    kind: { type: "string", enum: ["box", "text", "line"], description: "box = panel/button/image/bar; text = a short label; line = a divider (x,y to x+w,y+h)." },
+    kind: {
+      type: "string",
+      enum: ["box", "text", "line", "button", "led"],
+      description: "box = panel/image/bar/screen; text = a short label; line = a divider (x,y to x+w,y+h); button = a raised physical (or on-screen) button; led = a round light (fill = its colour, or '' when off).",
+    },
     x: num("Left, in frame pixels."),
     y: num("Top, in frame pixels."),
     w: num("Width in frame pixels (text: ignored, computed)."),
@@ -250,16 +254,20 @@ const shapeSchema = {
 export const visualSchema = {
   type: "object",
   properties: {
-    ...commonProperties("visual change", "Describe looks a player can picture, e.g. 'On a narrow screen, Save drops under the title.'"),
+    ...commonProperties("UX change", "Describe what a player would see or feel, e.g. 'On a narrow screen, Save drops under the title.' or 'Holding the button for 3 seconds now turns the light amber.'"),
     visual: {
       type: "object",
       properties: {
-        frame: { type: "string", enum: ["wide", "phone"], description: `wide = ${FRAMES.wide.w}x${FRAMES.wide.h} px (desktop/tablet), phone = ${FRAMES.phone.w}x${FRAMES.phone.h} px.` },
+        frame: {
+          type: "string",
+          enum: ["wide", "phone", "device"],
+          description: `wide = ${FRAMES.wide.w}x${FRAMES.wide.h} px (desktop, tablet, terminal), phone = ${FRAMES.phone.w}x${FRAMES.phone.h} px, device = ${FRAMES.device.w}x${FRAMES.device.h} px (a physical gadget: buttons, lights, a small display).`,
+        },
         // No minItems/maxItems on these nested arrays: Gemini rejects the schema with them (INVALID_ARGUMENT). Validation
         // enforces the limits instead.
         states: {
           type: "array",
-          description: "3-4 situations where the look matters (e.g. a narrow screen, a very long name, an empty list, dark mode, an error). Each must show a visible difference between before and after.",
+          description: "3-4 situations where the experience matters (a narrow screen, a long name, an error, a long button press, low battery...). Each must show a visible difference between before and after.",
           items: {
             type: "object",
             properties: {
@@ -288,20 +296,23 @@ export function visualPrompt(pr: PullRequestSource) {
   return `You design SlopHop puzzles. SlopHop shows curious people what is changing in the public software around them, as a tiny brain teaser.
 Two characters star in every puzzle: GREEN is the code this pull request ADDED, RED is the code it REMOVED.
 
-This puzzle is about HOW SOMETHING LOOKS: pick the one visual change this PR makes (layout, wrapping, sizes, spacing, colours,
-what shows or hides, what overflows or gets cut off...) and draw it as a tiny mock screen, before and after, in 3-4 situations.
+This puzzle is about UX: what a person sees or experiences changes. That can be a screen (layout, wrapping, sizes, colours,
+messages, what shows or hides), a terminal's output, or a physical device driven by this code (its buttons, status lights,
+little displays). Pick the one experience this PR changes and draw it as a tiny mock, before and after, in 3-4 situations.
 
-HOW THE MOCK SCREEN IS DRAWN (by our own code, in a chunky pixel style)
-- Frame: "wide" is ${FRAMES.wide.w}x${FRAMES.wide.h} px, "phone" is ${FRAMES.phone.w}x${FRAMES.phone.h} px. Coordinates are whole pixels from the top left.
-- "box": a filled rectangle (panel, button, card, image, bar), optional 1px outline. "line": a 1px line.
-- "text": a 3x5 pixel font, UPPERCASE, 4 px per character and 5 px tall; keep labels short (max 24 chars) and place them inside
-  their boxes with 2-3 px padding. Text that would not fit is exactly the kind of thing to show (cut off, wrapping, overlapping).
-- Use the project's real colours where the diff shows them, otherwise plain sensible UI colours. Keep it simple: 4-14 elements.
+HOW THE MOCK IS DRAWN (by our own code, in a chunky pixel style)
+- Frame: "wide" is ${FRAMES.wide.w}x${FRAMES.wide.h} px (desktop, tablet, terminal), "phone" is ${FRAMES.phone.w}x${FRAMES.phone.h} px,
+  "device" is ${FRAMES.device.w}x${FRAMES.device.h} px for a physical gadget. Coordinates are whole pixels from the top left.
+- "box": a filled rectangle (panel, card, image, bar, a device's body or its little screen), optional 1px outline.
+- "button": a raised button (physical or on screen). "led": a round status light; its fill is the colour it shows, '' when off.
+- "line": a 1px line. "text": a 3x5 pixel font, UPPERCASE, 4 px per character, 5 px tall; keep labels short (max 24 chars)
+  and inside their boxes with 2-3 px padding. Text that would not fit is exactly the kind of thing to show.
+- Use the project's real colours where the diff shows them, otherwise plain sensible ones. Keep it simple: 4-14 elements.
 
 YOUR JOB
-1. Read the diff (CSS, markup, layout code) and work out faithfully how the screen looked BEFORE and looks AFTER in each
-   situation. Mirror the real change; do not invent a different one. Give the same element the same id in before and after.
-2. Choose 3-4 situations where the difference is visible (e.g. a narrow screen, a very long name, many items, dark mode).
+1. Read the diff (markup, styles, UI or firmware code) and work out faithfully what the person experienced BEFORE and AFTER
+   in each situation. Mirror the real change; do not invent a different one. Give the same element the same id in both.
+2. Choose 3-4 situations where the difference shows (a narrow screen, a long name, an error, a long press, low battery...).
 3. Write the two rulebooks so a player can picture BOTH versions in every situation from the rules alone.
 4. Set the scene: "where" and "scenario" (second person).
 5. ${PLAIN}
@@ -312,7 +323,7 @@ ${prBlock(pr)}`;
 const HEX = /^#[0-9a-f]{6}$/i;
 
 function cleanShapes(shapes: ShapeDesign[] | undefined, frame: { w: number; h: number }): MockShape[] {
-  const kinds = ["box", "text", "line"];
+  const kinds = ["box", "text", "line", "button", "led"];
   const clamp = (value: unknown, min: number, max: number) => Math.round(Math.min(max, Math.max(min, Number(value) || 0)));
   const seen = new Set<string>();
   return (shapes ?? [])
@@ -331,8 +342,8 @@ function cleanShapes(shapes: ShapeDesign[] | undefined, frame: { w: number; h: n
         kind,
         x,
         y,
-        w: kind === "text" ? Math.max(0, text.length * 4 - 1) : clamp(shape.w, kind === "line" ? -frame.w : 1, frame.w * 2),
-        h: kind === "text" ? 5 : clamp(shape.h, kind === "line" ? -frame.h : 1, frame.h * 2),
+        w: kind === "text" ? Math.max(0, text.length * 4 - 1) : clamp(shape.w, kind === "line" ? -frame.w : kind === "led" ? 3 : 1, kind === "led" ? 16 : frame.w * 2),
+        h: kind === "text" ? 5 : clamp(shape.h, kind === "line" ? -frame.h : kind === "led" ? 3 : 1, kind === "led" ? 16 : frame.h * 2),
         ...(HEX.test(shape.fill ?? "") ? { fill: shape.fill } : {}),
         ...(HEX.test(shape.stroke ?? "") ? { stroke: shape.stroke } : {}),
         ...(kind === "text" ? { text, color: HEX.test(shape.color ?? "") ? shape.color : "#1b1a22" } : {}),

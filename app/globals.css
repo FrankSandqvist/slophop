@@ -90,6 +90,20 @@ a { color: inherit; }
 /* The cutscene: 16:9 at the top of the top screen, letterboxed in black; the text box sits over the bottom. */
 .fmv { position: absolute; inset: 0; display: block; padding: 0; border: 0; background: #000; cursor: pointer; }
 .fmv-canvas { margin: 0 auto; overflow: hidden; }
+/* Cutscene loading screen (PS1 "NOW LOADING"): Red and Green take turns hopping, a segmented bar fills as it downloads. */
+.fmv-loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: #000; color: #fff; font-size: 16px; line-height: 16px; }
+.fmv-loading-cast { display: flex; gap: 8px; }
+.fmv-loading-cast > * { animation: fmv-hop .8s steps(2) infinite; }
+.fmv-loading-cast > *:last-child { animation-delay: -.4s; }
+@keyframes fmv-hop { 50% { transform: translateY(-6px); } }
+.fmv-dots { display: inline-block; width: 24px; vertical-align: bottom; }
+.fmv-dots::after { content: "..."; display: block; width: 0; overflow: hidden; white-space: nowrap; animation: fmv-dots 1.2s steps(4) infinite; }
+@keyframes fmv-dots { to { width: 32px; } }
+.fmv-loading-bar { display: flex; gap: 2px; padding: 2px; border: 2px solid #fff; }
+.fmv-loading-bar i { width: 8px; height: 8px; background: #333; }
+.fmv-loading-bar i.on { background: var(--yellow); }
+.fmv-loading-bar.unknown i { animation: fmv-sweep 1s steps(1) infinite; }
+@keyframes fmv-sweep { 0%, 10% { background: var(--yellow); } 11% { background: #333; } }
 .fmv-skip { position: absolute; top: 6px; right: 6px; padding: 0 6px; background: var(--ink); color: #fff; font-size: 16px; animation: blink 1.6s steps(2) infinite; }
 /* Generation progress on the top screen: stage, a chunky bar (5% steps) and the percentage. */
 /* Generation progress: a band across the whole top of the top screen, stage | bar | percentage. */
@@ -216,11 +230,29 @@ a { color: inherit; }
 .numline-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .numline-value small { color: #6a6576; font-size: 16px; }
 
+/* Flows: the story card above the process map. */
+.flow-map { display: block; width: 100%; min-width: 0; overflow: hidden; }
+.flow-map svg { display: block; overflow: visible; }
+.flow-text { font-family: var(--pixel); font-size: 16px; fill: var(--ink); pointer-events: none; }
+.flow-hit { cursor: pointer; }
+.flow-hit:hover rect { stroke-width: 3; }
+.flow-story { line-height: 20px; }
+.flow-end { font-size: 16px; color: #6a6576; }
+.card-sub { display: block; color: #6a6576; }
+
+/* AI guards: an example input, tagged with what it is; "Should it?" marks your pick without judging it. */
+.ai-input { gap: 2px; }
+.ai-kind { display: inline-block; padding: 0 4px; background: var(--ink); color: #fff; font-size: 16px; line-height: 18px; }
+.ai-text { quotes: "“" "”"; overflow-wrap: anywhere; }
+.ai-card { text-align: left; }
+.card-chosen { background: #e9e5ff; }
+.step-tight { display: grid; gap: 4px; }
+
 /* Looks: mock screens drawn in the pixel style. Frames turn Green/Red only once revealed. */
 .mock { display: flex; justify-content: center; }
 .mock-tappable { cursor: crosshair; touch-action: manipulation; }
 .mock-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.mock-pick, .mock-frame { display: grid; gap: 2px; min-width: 0; padding: 4px; border: 3px solid var(--ink); background: #f1eddc; color: var(--ink); font: inherit; text-align: left; }
+.mock-pick, .mock-frame { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; padding: 4px; border: 3px solid var(--ink); background: #f1eddc; color: var(--ink); font: inherit; text-align: left; }
 .mock-pick { cursor: pointer; box-shadow: 0 3px 0 var(--ink); }
 .mock-pick:disabled { cursor: default; }
 .mock-picked { outline: 3px solid var(--yellow); outline-offset: 1px; }
@@ -234,13 +266,21 @@ a { color: inherit; }
 .menu-spinner { opacity: 1; animation: spin 1.2s steps(4) infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Kind badges: LOGIC (ink), MATH (yellow), LAYOUT (white). Never green/red: those mean Green and Red. */
+/* Kind badges: LOGIC (ink), MATH (yellow), UX (white), FLOW (sky blue). Never green/red: those mean Green and Red. */
 .kind-badge { display: inline-block; padding: 0 4px; border: 2px solid var(--ink); font-size: 16px; line-height: 16px; font-weight: normal; vertical-align: 1px; }
 .kind-badges { display: inline-flex; align-items: center; gap: 0; vertical-align: 1px; }
 .kind-plus { margin: 0 3px; color: #6a6576; }
 .kind-logic { background: var(--ink); color: #fff; }
 .kind-numeric { background: var(--yellow); color: var(--ink); }
 .kind-visual { background: #fff; color: var(--ink); }
+.kind-flow { background: #6ec6ea; color: var(--ink); }
+.kind-ai { background: #c4b3f0; color: var(--ink); }
+/* The kind row on the menu: filters the list and sets what "+ New puzzle" makes. Unpicked chips are plain white. */
+.kind-filter { display: flex; flex-wrap: wrap; gap: 6px; }
+.kind-chip { padding: 0 8px 2px; border: 2px solid var(--ink); background: #fff; color: var(--ink); font: inherit; font-size: 16px; line-height: 22px; cursor: pointer; box-shadow: 0 2px 0 var(--ink); }
+.kind-chip:active { transform: translateY(2px); box-shadow: none; }
+.kind-chip[aria-pressed="false"] { background: #fff; color: #6a6576; }
+.kind-chip.kind-all[aria-pressed="true"] { background: var(--ink); color: #fff; }
 
 /* First-time tutorial card. */
 .howto { display: grid; gap: 6px; padding: 6px 10px 8px; border: 3px solid var(--ink); background: #fff; }

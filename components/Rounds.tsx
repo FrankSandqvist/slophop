@@ -510,6 +510,30 @@ export function RulesSheet({ puzzle, onClose }: { puzzle: Puzzle; onClose?: () =
             )}
           </>
         )}
+        {puzzle.ai && (
+          <>
+            <div>
+              <dt>Guarding</dt>
+              <dd>{puzzle.ai.guard}</dd>
+            </div>
+            <div>
+              <dt>What it can do</dt>
+              <dd>{puzzle.ai.outcomes.map((outcome) => outcome.label).join(" · ")}</dd>
+            </div>
+          </>
+        )}
+        {puzzle.flow?.states.map((state) => (
+          <div key={`flow-${state.id}`}>
+            <dt>{state.label}</dt>
+            <dd>{state.explain}</dd>
+          </div>
+        ))}
+        {puzzle.flow && (
+          <div>
+            <dt>What can happen</dt>
+            <dd>{puzzle.flow.events.map((event) => event.label).join(" · ")}</dd>
+          </div>
+        )}
         {puzzle.visual?.states.map((state) => (
           <div key={state.id}>
             <dt>{state.label}</dt>

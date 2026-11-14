@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { MascotKind } from "@/lib/mascot";
 import { audioLog, audioState, playLoop, sfx, unlockAudio } from "@/lib/sound";
-import type { PropSpec, Puzzle, StageCard } from "@/lib/types";
+import { FAMILY_BADGES, type PropSpec, type Puzzle, type PuzzleFamily, type StageCard } from "@/lib/types";
 import { DSShell, TextBox, type Line } from "./DS";
 import type { Job } from "@/lib/jobs";
 import { KindBadge } from "./KindBadge";
@@ -22,7 +22,7 @@ type Progress = {
   cards?: StageCard[];
   pick?: number;
   component?: string;
-  family?: "logic" | "numeric" | "visual";
+  family?: "logic" | "numeric" | "visual" | "flow" | "ai";
   props?: PropSpec[];
 };
 
@@ -85,9 +85,21 @@ function banter(family?: Progress["family"]): Line[] {
           { who: "del", text: "Now it runs both on every number in the range. Mine were fine, for the record." },
           { who: "add", text: "Checking our rulebooks add up. Literally." },
         ]
+      : family === "ai"
+        ? [
+            { who: "add", text: "It's an AI one. Gemini's writing my guard and Red's old one in Python, then testing them both." },
+            { who: "del", text: "It throws sample messages and tool calls at us. Harmless ones, promise. Mock villainy only." },
+            { who: "add", text: "Checking our rulebooks match what the guards actually did." },
+          ]
+      : family === "flow"
+        ? [
+            { who: "add", text: "It's a flow one. Gemini's drawing the whole process: every step and every arrow, before and after." },
+            { who: "del", text: "Then our own code walks a few stories through both maps. No guessing, just following arrows." },
+            { who: "add", text: "Checking our rulebooks match the maps." },
+          ]
       : family === "visual"
         ? [
-            { who: "add", text: "It's a looks one. Gemini's drawing the screen the old way first. That's Red's look." },
+            { who: "add", text: "It's a UX one. Gemini's sketching it the old way first, screen, buttons and all. That's Red's look." },
             { who: "del", text: "Classic look. Now it's drawing Green's. Same screen, smaller ego." },
             { who: "add", text: "Checking our rulebooks match the pictures." },
           ]
@@ -127,6 +139,9 @@ export function HomeDS({ puzzles, jobs = [] }: { puzzles: Summary[]; jobs?: Job[
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [prUrl, setPrUrl] = useState("");
+  // One kind choice: filters the list and is what "+ New puzzle" makes ("all" = a random kind).
+  const [kind, setKind] = useState<PuzzleFamily | "all">("all");
+  const shown = kind === "all" ? puzzles : puzzles.filter((puzzle) => (puzzle.families ?? [puzzle.family ?? "logic"]).includes(kind));
   const [showUrl, setShowUrl] = useState(false);
 
   const line = lines[Math.min(index, lines.length - 1)] ?? null;
@@ -390,7 +405,7 @@ export function HomeDS({ puzzles, jobs = [] }: { puzzles: Summary[]; jobs?: Job[
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // Only when the PR link field is open: a link left in a hidden field must not hijack "+ New puzzle".
-        body: JSON.stringify({ prUrl: (showUrl && prUrl.trim()) || undefined }),
+        body: JSON.stringify({ prUrl: (showUrl && prUrl.trim()) || undefined, family: kind === "all" ? undefined : kind }),
       });
       if (!response.body) throw new Error("No response from the server.");
       const reader = response.body.getReader();
@@ -479,7 +494,7 @@ export function HomeDS({ puzzles, jobs = [] }: { puzzles: Summary[]; jobs?: Job[
 
           <div className="menu-actions">
             <button className="px-btn px-btn-go" onClick={create} disabled={busy}>
-              {busy ? "Making one..." : "+ New puzzle"}
+              {busy ? "Making one..." : kind === "all" ? "+ New puzzle" : `+ New ${FAMILY_BADGES[kind]} puzzle`}
             </button>
             <button className="px-btn px-btn-small" onClick={() => setShowUrl((value) => !value)} disabled={busy} aria-expanded={showUrl}>
               PR link
@@ -498,6 +513,21 @@ export function HomeDS({ puzzles, jobs = [] }: { puzzles: Summary[]; jobs?: Job[
           )}
           {error && <p className="menu-error" role="alert">{error}</p>}
 
+          <div className="kind-filter" role="group" aria-label="Kind of puzzle">
+            {(["all", "logic", "numeric", "visual", "flow", "ai"] as const).map((option) => (
+              <button
+                key={option}
+                className={`kind-chip ${option === "all" ? "kind-all" : `kind-${option}`}`}
+                aria-pressed={kind === option}
+                onClick={() => {
+                  sfx.cycle();
+                  setKind(option);
+                }}
+              >
+                {option === "all" ? "ALL" : FAMILY_BADGES[option]}
+              </button>
+            ))}
+          </div>
           {(busy || jobs.length > 0) && (
             <p className="menu-wait">Bored of waiting? Play one of the ones already made. The new one keeps cooking and pops up here.</p>
           )}
@@ -515,7 +545,7 @@ export function HomeDS({ puzzles, jobs = [] }: { puzzles: Summary[]; jobs?: Job[
                 </span>
               </li>
             ))}
-            {puzzles.map((puzzle) => (
+            {shown.map((puzzle) => (
               <li key={puzzle.id}>
                 <Link href={`/play/${puzzle.id}`} className="menu-item" onClick={() => sfx.select()}>
                   <span className="menu-arrow" aria-hidden>▶</span>
@@ -530,7 +560,9 @@ export function HomeDS({ puzzles, jobs = [] }: { puzzles: Summary[]; jobs?: Job[
                 </Link>
               </li>
             ))}
-            {!puzzles.length && <li className="menu-empty">No puzzles yet. Make the first one!</li>}
+            {!shown.length && (
+              <li className="menu-empty">{kind === "all" ? "No puzzles yet. Make the first one!" : `No ${FAMILY_BADGES[kind]} puzzles yet. Make one!`}</li>
+            )}
           </ul>
         </div>
       }

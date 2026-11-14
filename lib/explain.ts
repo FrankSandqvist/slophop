@@ -1,13 +1,13 @@
 import "server-only";
 import { MODELS, generateJson } from "./gemini";
-import { formatNumber, outcome, pointAt, voteRow, type Explainer, type Puzzle, type PuzzleRow, type Round } from "./types";
+import { flowKey, flowStory, formatNumber, outcome, pointAt, voteRow, type Explainer, type Puzzle, type PuzzleRow, type Round } from "./types";
 
 /**
  * Case explainers: after each step, Red and Green say why they did what they did in that exact case, plus a takeaway.
  * One fast Gemini call per puzzle, from a precise description of every step's case (values, results, neighbours).
  */
 
-type Explainable = Pick<Puzzle, "family" | "project" | "change" | "scenario" | "rules" | "inputs" | "outcomes" | "table" | "numeric" | "visual" | "rounds">;
+type Explainable = Pick<Puzzle, "family" | "project" | "change" | "scenario" | "rules" | "inputs" | "outcomes" | "table" | "numeric" | "visual" | "flow" | "ai" | "rounds">;
 
 function rowText(puzzle: Explainable, row: PuzzleRow | undefined) {
   if (!row) return "(unknown case)";
@@ -66,6 +66,46 @@ function describe(puzzle: Explainable, round: Round): string {
       return `Asked for the first ${model?.input.label} where Green differs from Red. Just before: ${neighbour(round.answer, -1)}. At the answer: ${num(round.answer)}`;
     case "num-reach":
       return `Asked for the smallest ${model?.input.label} where Green's ${model?.output.label} reaches ${formatNumber(round.target, model?.output.unit ?? "", model?.output.decimals)}. Just before: ${neighbour(round.answer, -1)}. At the answer: ${num(round.answer)}`;
+    case "ai-gate":
+    case "ai-should":
+    case "ai-slip":
+    case "ai-diff": {
+      const ai = puzzle.ai;
+      if (!ai) return "(ai)";
+      const label = (id: string) => ai.outcomes.find((outcome) => outcome.id === id)?.label ?? id;
+      const example = (id: string) => {
+        const entry = ai.examples.find((item) => item.id === id);
+        return entry ? `${entry.kind} "${entry.text}" → Red's guard: ${label(entry.old)}; Green's guard: ${label(entry.new)}` : id;
+      };
+      if (round.kind === "ai-gate") return `Guarding ${ai.guard}. Asked what ${round.side === "new" ? "Green's" : "Red's"} guard does with this input. ${example(round.example)}`;
+      if (round.kind === "ai-should") return `Guarding ${ai.guard}. The player first decided what SHOULD happen, then saw what the guards do. ${example(round.example)}`;
+      if (round.kind === "ai-slip") return `Guarding ${ai.guard}. Asked which input gets through Green's guard. It's: ${example(round.answer)}`;
+      return `Guarding ${ai.guard}. Asked which input Green treats differently from Red. It's: ${example(round.answer)}`;
+    }
+    case "flow-trace":
+    case "flow-change":
+    case "flow-dead":
+    case "flow-break": {
+      const flow = puzzle.flow;
+      if (!flow) return "(flow)";
+      const label = (id: string) => flow.states.find((state) => state.id === id)?.label ?? id;
+      const story = (id: string) => {
+        const scenario = flow.scenarios.find((entry) => entry.id === id);
+        return scenario
+          ? `"${flowStory(flow, scenario)}" → Red ends at ${label(scenario.old[scenario.old.length - 1])} (path ${scenario.old.map(label).join(" > ")}); Green ends at ${label(scenario.new[scenario.new.length - 1])} (path ${scenario.new.map(label).join(" > ")})`
+          : id;
+      };
+      const arrow = (transition: { from: string; event: string; to: string }) => `${label(transition.from)} --${flow.events.find((event) => event.id === transition.event)?.label ?? transition.event}--> ${label(transition.to)}`;
+      const oldKeys = new Set(flow.old.map(flowKey));
+      const newKeys = new Set(flow.new.map(flowKey));
+      if (round.kind === "flow-trace") return `Asked where this story ends on ${round.side === "new" ? "Green's" : "Red's"} map. ${story(round.scenario)}`;
+      if (round.kind === "flow-change") {
+        const only = round.side === "new" ? flow.new.filter((entry) => !oldKeys.has(flowKey(entry))) : flow.old.filter((entry) => !newKeys.has(flowKey(entry)));
+        return `Asked to tap the arrow only ${round.side === "new" ? "Green's" : "Red's"} map has: ${only.map(arrow).join("; ")}`;
+      }
+      if (round.kind === "flow-dead") return `Asked which step ${round.mode === "lost" ? "can no longer be reached with Green's map" : "can only be reached with Green's map"}: ${label(round.answer)}`;
+      return `Asked which story ends somewhere bad with Green. The bad one: ${story(round.answer)}`;
+    }
     case "vis-which":
     case "vis-spot": {
       const state = puzzle.visual?.states.find((entry) => entry.id === round.state);

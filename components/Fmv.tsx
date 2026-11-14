@@ -1,20 +1,26 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FmvLine } from "@/lib/types";
+import { MascotHead } from "./Rounds";
 
 /** FMV resolution: about the stage's 256px width, 16:9, adjusted so a whole-number scale fills the screen width. */
 const TARGET_W = 256;
+/** Segments in the loading bar. */
+const SEGMENTS = 10;
 const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map((value) => value / 16 - 0.5);
 
 /**
  * Plays the puzzle's cutscene on the top screen like a PS1 FMV: drawn into a ~256x144 canvas, ordered-dithered and crushed
  * to 15-bit colour (the same treatment as the stage), letterboxed. Reports which dialogue line is due, so the text box
- * follows the picture. Tap to skip. The clip's own audio stays muted; the soundtrack keeps playing.
+ * follows the picture. A PS1-style NOW LOADING screen (download progress in segments) covers the wait. Tap to skip. The clip's own audio stays muted; the soundtrack keeps playing.
  */
 export function Fmv({ src, lines, onLine, onDone }: { src: string; lines: FmvLine[]; onLine: (index: number) => void; onDone: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const callbacks = useRef({ onLine, onDone });
+  // Download progress 0-1 (null while the size is unknown), and whether the first frame is on screen.
+  const [progress, setProgress] = useState<number | null>(0);
+  const [ready, setReady] = useState(false);
   useEffect(() => {
     callbacks.current = { onLine, onDone };
   }, [onLine, onDone]);
@@ -59,6 +65,7 @@ export function Fmv({ src, lines, onLine, onDone }: { src: string; lines: FmvLin
     const draw = () => {
       frame = requestAnimationFrame(draw);
       if (video.readyState < 2) return;
+      setReady(true);
       const { width, height } = context.canvas;
       context.drawImage(video, 0, 0, width, height);
       const image = context.getImageData(0, 0, width, height);
@@ -81,9 +88,29 @@ export function Fmv({ src, lines, onLine, onDone }: { src: string; lines: FmvLin
       }
     };
 
-    // Fetched whole and played from a blob URL: small file, and no range requests needed.
-    fetch(src)
-      .then((response) => (response.ok ? response.blob() : Promise.reject(new Error(`cutscene ${response.status}`))))
+    // Fetched whole and played from a blob URL: small file, and no range requests needed. Read as a stream so the
+    // loading bar shows real progress when the size is known.
+    const download = async () => {
+      const response = await fetch(src);
+      if (!response.ok) throw new Error(`cutscene ${response.status}`);
+      const total = Number(response.headers.get("content-length") || response.headers.get("x-size")) || 0;
+      if (!response.body || !total) {
+        setProgress(null);
+        return response.blob();
+      }
+      const reader = response.body.getReader();
+      const chunks: Uint8Array<ArrayBuffer>[] = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done || cancelled) break;
+        chunks.push(value);
+        received += value.length;
+        setProgress(Math.min(1, received / total));
+      }
+      return new Blob(chunks, { type: response.headers.get("content-type") || "video/mp4" });
+    };
+    download()
       .then((blob) => {
         if (cancelled) return;
         url = URL.createObjectURL(blob);
@@ -107,6 +134,20 @@ export function Fmv({ src, lines, onLine, onDone }: { src: string; lines: FmvLin
   return (
     <button className="fmv" onClick={() => callbacks.current.onDone()} aria-label="Skip the cutscene">
       <canvas ref={canvasRef} className="ps1 fmv-canvas" width={TARGET_W} height={(TARGET_W * 9) / 16} aria-hidden />
+      {!ready && (
+        <span className="fmv-loading" aria-label="Loading the cutscene">
+          <span className="fmv-loading-cast">
+            <MascotHead kind="del" />
+            <MascotHead kind="add" />
+          </span>
+          <span className="fmv-loading-text">NOW LOADING<span className="fmv-dots" /></span>
+          <span className={`fmv-loading-bar${progress === null ? " unknown" : ""}`} aria-hidden>
+            {Array.from({ length: SEGMENTS }, (_, index) => (
+              <i key={index} className={progress !== null && index < Math.round(progress * SEGMENTS) ? "on" : ""} style={progress === null ? { animationDelay: `${index / SEGMENTS}s` } : undefined} />
+            ))}
+          </span>
+        </span>
+      )}
       <span className="fmv-skip">SKIP ▶▶</span>
     </button>
   );

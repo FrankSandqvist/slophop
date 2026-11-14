@@ -16,12 +16,14 @@ import {
   type VisualDesign,
 } from "./families";
 import { explainRounds } from "./explain";
+import { buildFlowRounds, flowPrompt, flowSchema, validateFlow, type FlowDesign } from "./flows";
+import { aiPrompt, aiSchema, buildAiRounds, validateAi, type AiDesign } from "./ai";
 import { clearJob, saveJob } from "./jobs";
 import { researchWorld } from "./world";
 import { settleLimited } from "./limit";
 import { mascotReferences } from "./sprites";
 import { listFiles, readText, saveFile } from "./storage";
-import { rowKey, type FmvLine, type NumericModel, type PropSpec, type PuzzleFamily, type VisualModel, type Puzzle, type PuzzleInput, type PuzzleOutcome, type PuzzleRow, type Round, type StageCard, type VoteTally } from "./types";
+import { rowKey, type AiModel, type FlowModel, type FmvLine, type NumericModel, type PropSpec, type PuzzleFamily, type VisualModel, type Puzzle, type PuzzleInput, type PuzzleOutcome, type PuzzleRow, type Round, type StageCard, type VoteTally } from "./types";
 
 export type { Puzzle } from "./types";
 
@@ -70,7 +72,9 @@ const RANK_QUESTIONS: Record<string, DecisionQuestion> = {
     criteria: {
       logic: "Logic: conditions or limits decide what happens (accept or reject, allow or block, show or hide, which path is taken)",
       numeric: "Numbers: a calculated amount changes (a price, fee, total, discount, rounding, duration, score or size worked out from other numbers)",
-      visual: "Looks: how something on screen looks or is laid out changes (sizes, spacing, wrapping, colours, what shows or hides)",
+      visual: "UX: what a person sees or experiences changes: a screen's layout, messages or what shows and hides, terminal output, or a device's buttons, lights and little displays",
+      flow: "Flow: how things move through a multi-step process changes (order or payment statuses, refunds, subscriptions, approvals, workflows)",
+      ai: "AI: how an AI feature is guarded or checked changes (prompt-injection defences, safety filters, tool permissions for agents, checks on model output, redaction)",
       none: "None of these: refactors, docs, tooling, tests or dependencies",
     },
   },
@@ -86,6 +90,10 @@ const RANK_QUESTIONS: Record<string, DecisionQuestion> = {
   },
   plain: { type: "noul", instructions: "Could the changed behaviour be explained in everyday language, with no programming jargon, in two sentences?" },
   noise: { type: "noul", instructions: "Is this change mostly noise: only tests, formatting, generated files, version bumps or comments?" },
+  process: {
+    type: "noul",
+    instructions: "Does this change how people, orders, payments, tickets or accounts move through a multi-step process (statuses, lifecycles, workflows, approvals, refunds, subscriptions)?",
+  },
   // Crypto projects are star-rich and AI-heavy, so they crowd the picks; a small hit keeps the mix varied.
   crypto: {
     type: "noul",
@@ -109,11 +117,13 @@ async function rankScore(pr: PullRequestSource, signal?: AbortSignal) {
   };
   const kind = answers.kind;
   const probabilities = kind?.type === "choice" ? kind.probabilities : {};
-  const fit: Fit = { logic: probabilities.logic ?? 0, numeric: probabilities.numeric ?? 0, visual: probabilities.visual ?? 0 };
+  const fit: Fit = { logic: probabilities.logic ?? 0, numeric: probabilities.numeric ?? 0, visual: probabilities.visual ?? 0, flow: probabilities.flow ?? 0, ai: probabilities.ai ?? 0 };
   const base = Math.max(0, 0.35 * level("worth") + 0.25 * level("small") + 0.25 * level("relatable") + 0.15 * yes("plain") - 0.4 * yes("noise"));
   // Small hit for crypto (at most -15%): it can still win when it's clearly the best puzzle.
   const score = base * (1 - 0.15 * yes("crypto"));
-  return { score, fit };
+  // Flows are about bigger business changes, so their score doesn't count size against them; "is it a process" counts instead.
+  const flowBase = Math.max(0, 0.35 * level("worth") + 0.25 * level("relatable") + 0.15 * yes("plain") + 0.25 * yes("process") - 0.4 * yes("noise"));
+  return { score, fit, flowScore: flowBase * (1 - 0.15 * yes("crypto")) };
 }
 
 /** 0..1 for how widely known a repo is: log scale, 10k+ stars = 1. */
@@ -121,7 +131,7 @@ const prevalence = (stars: number | null | undefined) => Math.min(1, Math.log10(
 const KNOWN_STARS = Number(process.env.MIN_STARS || 50);
 
 /** How often each kind of puzzle is aimed for, so the puzzle list gets variety. */
-const FAMILY_WEIGHTS: Fit = { logic: 0.4, numeric: 0.3, visual: 0.3 };
+const FAMILY_WEIGHTS: Fit = { logic: 0.25, numeric: 0.2, visual: 0.2, flow: 0.17, ai: 0.18 };
 
 /**
  * Aims for a random kind of puzzle and takes the best PR that fits it (a clear fit, and not much worse than the best PR).
@@ -156,22 +166,42 @@ function familyWeights(recent: PuzzleFamily[]): Fit {
 }
 
 function chooseCandidate(
-  ranked: Array<{ score: number | null; fit: Fit | null; pr: { stars: number | null } }>,
+  ranked: Array<{ score: number | null; flowScore?: number | null; fit: Fit | null; pr: { stars: number | null } }>,
   recent: PuzzleFamily[] = [],
+  asked?: PuzzleFamily,
 ): { index: number; family: PuzzleFamily; second?: PuzzleFamily } {
   const best = ranked[0]?.score;
   if (best === null || best === undefined) return { index: 0, family: "logic" };
   let roll = Math.random();
   // PUZZLE_FAMILY=numeric|visual|logic forces the aim (testing); otherwise it's drawn by FAMILY_WEIGHTS.
-  const forced = process.env.PUZZLE_FAMILY as PuzzleFamily | undefined;
+  // The player's choice wins, then PUZZLE_FAMILY (testing).
+  const forced = asked ?? (process.env.PUZZLE_FAMILY as PuzzleFamily | undefined);
   const weights = familyWeights(recent);
   const target = forced && forced in FAMILY_WEIGHTS ? forced : ((Object.keys(weights) as PuzzleFamily[]).find((family) => (roll -= weights[family]) < 0) ?? "logic");
   // The best fit for the kind; a well-known repo (players may know it) wins only if it's nearly as good (within 15%).
+  // Flows use their own score (size doesn't count against them).
+  const scoreFor = (entry: (typeof ranked)[number]) => (target === "flow" ? (entry.flowScore ?? entry.score) : entry.score);
+  const bestFor = Math.max(0, ...ranked.map((entry) => scoreFor(entry) ?? 0));
   const value = (entry: (typeof ranked)[number]) => {
     const fit = entry.fit?.[target] ?? 0;
-    return entry.score === null || fit < 0.45 || entry.score < best * 0.6 ? 0 : entry.score * fit;
+    const score = scoreFor(entry);
+    return score === null || score === undefined || fit < 0.45 || score < bestFor * 0.6 ? 0 : score * fit;
   };
   const top = Math.max(0, ...ranked.map(value));
+  // Asked for a kind but nothing clearly fits: take the PR that fits it best anyway (any real fit) rather than switch kinds.
+  if (top <= 0 && forced && forced in FAMILY_WEIGHTS) {
+    let index = -1;
+    let bestValue = 0;
+    ranked.forEach((entry, i) => {
+      const score = scoreFor(entry) ?? 0;
+      const fit = entry.fit?.[target] ?? 0;
+      if (fit > 0.1 && score * fit > bestValue) {
+        bestValue = score * fit;
+        index = i;
+      }
+    });
+    if (index >= 0) return { index, family: target, second: secondFamily(ranked[index].fit, target) };
+  }
   if (top > 0) {
     const known = ranked.findIndex((entry) => (entry.pr.stars ?? 0) >= KNOWN_STARS && value(entry) >= top * 0.85);
     const index = known >= 0 ? known : ranked.findIndex((entry) => value(entry) === top);
@@ -194,6 +224,7 @@ async function rankCandidates(candidates: PullRequestSource[], signal?: AbortSig
     return {
       pr,
       score: result.status === "fulfilled" ? result.value.score * (0.9 + 0.1 * prevalence(pr.stars)) : (null as number | null),
+      flowScore: result.status === "fulfilled" ? result.value.flowScore * (0.9 + 0.1 * prevalence(pr.stars)) : (null as number | null),
       fit: result.status === "fulfilled" ? result.value.fit : (null as Fit | null),
       order: index,
     };
@@ -797,13 +828,17 @@ const HEDGE_MS = Number(process.env.MODEL_HEDGE_MS || 40_000);
 export type Modelled =
   | { family: "logic"; inputs: PuzzleInput[]; outcomes: PuzzleOutcome[]; table: PuzzleRow[] }
   | { family: "numeric"; numeric: NumericModel }
-  | { family: "visual"; visual: VisualModel };
+  | { family: "visual"; visual: VisualModel }
+  | { family: "flow"; flow: FlowModel }
+  | { family: "ai"; ai: AiModel };
 
 /** Per kind of puzzle: what to ask, the answer's shape, whether it runs Python, and how we check the answer. */
 const DESIGNS: Record<PuzzleFamily, { prompt: (pr: PullRequestSource) => string; schema: Record<string, unknown>; python: boolean; check: (data: never) => Modelled }> = {
   logic: { prompt: (pr) => modelPrompt(pr, FOCUS), schema, python: true, check: (data: Design) => ({ family: "logic", ...validate(data) }) },
   numeric: { prompt: numericPrompt, schema: numericSchema, python: true, check: (data: NumericDesign) => ({ family: "numeric", numeric: validateNumeric(data) }) },
   visual: { prompt: visualPrompt, schema: visualSchema, python: false, check: (data: VisualDesign) => ({ family: "visual", visual: validateVisual(data) }) },
+  flow: { prompt: flowPrompt, schema: flowSchema, python: false, check: (data: FlowDesign) => ({ family: "flow", flow: validateFlow(data) }) },
+  ai: { prompt: aiPrompt, schema: aiSchema, python: true, check: (data: AiDesign) => ({ family: "ai", ai: validateAi(data) }) },
 };
 
 export async function modelHedged(pr: PullRequestSource, family: PuzzleFamily, signal?: AbortSignal) {
@@ -870,7 +905,7 @@ export const ALREADY_MADE = "already made";
 
 const newId = () => `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
 
-export async function createPuzzle(options: { prUrl?: string; emit: (event: ProgressEvent) => void; signal?: AbortSignal }) {
+export async function createPuzzle(options: { prUrl?: string; family?: PuzzleFamily; emit: (event: ProgressEvent) => void; signal?: AbortSignal }) {
   const id = newId();
   const startedAt = new Date().toISOString();
   await saveJob({ id, startedAt });
@@ -881,7 +916,7 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
   }
 }
 
-async function makePuzzle(id: string, startedAt: string, options: { prUrl?: string; emit: (event: ProgressEvent) => void; signal?: AbortSignal }) {
+async function makePuzzle(id: string, startedAt: string, options: { prUrl?: string; family?: PuzzleFamily; emit: (event: ProgressEvent) => void; signal?: AbortSignal }) {
   const { emit, signal } = options;
 
   emit({ type: "stage", stage: "fetch", status: "active" });
@@ -910,7 +945,7 @@ async function makePuzzle(id: string, startedAt: string, options: { prUrl?: stri
   // Aim for a kind of puzzle (variety) and put the PR chosen for it first: everything below uses ranked[0].
   // Lean toward the kinds that have been rare in the last 12 puzzles.
   const recentFamilies = (await existing).slice(0, 12).flatMap((puzzle) => puzzle.families ?? [puzzle.family ?? "logic"]);
-  const chosen = chooseCandidate(scored, recentFamilies);
+  const chosen = chooseCandidate(scored, recentFamilies, options.family);
   const ranked = [scored[chosen.index], ...scored.filter((_, index) => index !== chosen.index)];
   void saveJob({ id, startedAt, repository: ranked[0].pr.repository, title: ranked[0].pr.title });
   const top = ranked.slice(0, 5);
@@ -971,7 +1006,7 @@ async function makePuzzle(id: string, startedAt: string, options: { prUrl?: stri
     });
 
   const pr = await addContext(ranked[0].pr);
-  const kindName = { logic: "logic", numeric: "numbers", visual: "looks" }[chosen.family];
+  const kindName = { logic: "logic", numeric: "numbers", visual: "UX", flow: "flow", ai: "AI" }[chosen.family];
   const choice = {
     reason:
       ranked[0].score !== null
@@ -1003,7 +1038,11 @@ async function makePuzzle(id: string, startedAt: string, options: { prUrl?: stri
       ? `${result.table.length} cases · ${result.table.filter((row) => row.old !== row.new).length} changed`
       : result.family === "numeric"
         ? `${result.numeric.points.length} numbers · ${result.numeric.points.filter((point) => point.old !== point.new).length} changed`
-        : `${result.visual.states.length} situations`;
+        : result.family === "flow"
+          ? `${result.flow.states.length} steps · ${result.flow.scenarios.length} stories`
+          : result.family === "ai"
+            ? `${result.ai.examples.length} examples · ${result.ai.examples.filter((example) => example.old !== example.new).length} changed`
+            : `${result.visual.states.length} situations`;
   emit({ type: "stage", stage: "model", status: "done", detail });
 
   // Rounds come from our code; the case explainers (one Gemini call) run while the music and cutscene finish.
@@ -1059,6 +1098,8 @@ export function composeFamilies(primary: Modelled, extra?: Modelled | null) {
   const logic = parts.find((part) => part.family === "logic");
   const numeric = parts.find((part) => part.family === "numeric");
   const visual = parts.find((part) => part.family === "visual");
+  const flow = parts.find((part) => part.family === "flow");
+  const ai = parts.find((part) => part.family === "ai");
   return {
     family: primary.family,
     ...(extra ? { families: parts.map((part) => part.family) } : {}),
@@ -1067,6 +1108,8 @@ export function composeFamilies(primary: Modelled, extra?: Modelled | null) {
     table: logic?.family === "logic" ? logic.table : [],
     ...(numeric?.family === "numeric" ? { numeric: numeric.numeric } : {}),
     ...(visual?.family === "visual" ? { visual: visual.visual } : {}),
+    ...(flow?.family === "flow" ? { flow: flow.flow } : {}),
+    ...(ai?.family === "ai" ? { ai: ai.ai } : {}),
   };
 }
 
@@ -1075,7 +1118,11 @@ function roundsOf(part: Modelled): Round[] {
     ? buildRounds(part.table, part.outcomes, part.inputs)
     : part.family === "numeric"
       ? buildNumericRounds(part.numeric)
-      : buildVisualRounds(part.visual);
+      : part.family === "flow"
+        ? buildFlowRounds(part.flow)
+        : part.family === "ai"
+          ? buildAiRounds(part.ai)
+          : buildVisualRounds(part.visual);
 }
 
 /** Steps for one kind, or both kinds interleaved (primary first), at most 5 in all. */

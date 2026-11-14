@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { musicBeat } from "@/lib/sound";
 import { drawMascot, MASCOT_H, MASCOT_W, type MascotKind, type MascotMood } from "@/lib/mascot";
+import { drawGlyphs } from "@/lib/logo";
 import { drawText, LINE, textWidth } from "@/lib/pixelfont";
 import type { PropSpec, StageCard } from "@/lib/types";
 
@@ -182,10 +183,11 @@ function drawBoard(ctx: CanvasRenderingContext2D, show: StageShow | undefined, t
     // Plain letters here: the mascots stand right in front of the TV, so faces in the logo would double them up.
     const slop = textWidth("SLOP") * 3;
     const x = Math.round((BOARD_W - (slop + 4 + textWidth("HOP") * 3)) / 2);
-    drawText(ctx, "SLOP", x + 2, 25 + bounce + 2, "#1b1a22", 3);
-    drawText(ctx, "SLOP", x, 25 + bounce, "#28c840", 3);
-    drawText(ctx, "HOP", x + slop + 4 + 2, 25 - bounce + 2, "#1b1a22", 3);
-    drawText(ctx, "HOP", x + slop + 4, 25 - bounce, "#ff4757", 3);
+    // Squared-off logo letters (lib/logo.ts), same as the menu's, so the shadow stays clean.
+    drawGlyphs(ctx, "SLOP", x + 2, 25 + bounce + 2, "#1b1a22", 3);
+    drawGlyphs(ctx, "SLOP", x, 25 + bounce, "#28c840", 3);
+    drawGlyphs(ctx, "HOP", x + slop + 4 + 2, 25 - bounce + 2, "#1b1a22", 3);
+    drawGlyphs(ctx, "HOP", x + slop + 4, 25 - bounce, "#ff4757", 3);
     const ticker = `${show?.headline ? show.headline + "  *  " : ""}REAL CODE CHANGES  *  TINY BRAIN TEASERS  *  `;
     const offset = Math.floor((t * 18) % (ticker.length * 4));
     ctx.fillStyle = "#1b1a22";

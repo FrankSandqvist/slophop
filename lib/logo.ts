@@ -1,12 +1,38 @@
 import { drawHead, HEAD_SIZE, type MascotKind } from "./mascot";
-import { drawText } from "./pixelfont";
+
 
 /**
  * The SlopHop wordmark in the pixel font, with the mascots' faces as the O's: "SL(Green)P H(Red)P".
  * Shared by the stage's TV and the menu header. Coordinates are canvas pixels; `scale` is the letter size (3 = 15px tall).
  */
 
-const ADVANCE = 4; // pixel font: 3px glyph + 1px gap
+/**
+ * The logo's letters: the 3x5 pixel font's size, but squared off (no diagonal steps in S and P), so the 2px drop shadow
+ * stays clean. One cell = `scale` px.
+ */
+const GLYPHS: Record<string, string[]> = {
+  S: ["###", "#..", "###", "..#", "###"],
+  L: ["#..", "#..", "#..", "#..", "###"],
+  P: ["###", "#.#", "###", "#..", "#.."],
+  H: ["#.#", "#.#", "###", "#.#", "#.#"],
+  O: ["###", "#.#", "#.#", "#.#", "###"],
+};
+const GLYPH_W = 3;
+const ADVANCE = GLYPH_W + 1; // 3px glyph + 1px gap, like the pixel font
+const SHADOW = 2;
+
+/** Logo lettering (S, L, O, P, H) in the squared-off style; also used for the plain SLOP HOP on the stage's TV. */
+export function drawGlyphs(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string, scale: number) {
+  ctx.fillStyle = color;
+  [...text].forEach((char, index) => {
+    const rows = GLYPHS[char] ?? [];
+    rows.forEach((row, ry) => {
+      [...row].forEach((cell, rx) => {
+        if (cell === "#") ctx.fillRect(x + (index * ADVANCE + rx) * scale, y + ry * scale, scale, scale);
+      });
+    });
+  });
+}
 const WORD_GAP = 4;
 const INK = "#1b1a22";
 const WORDS: Array<{ color: string; parts: Array<string | MascotKind> }> = [
@@ -25,8 +51,8 @@ function wordWidth(parts: string[], scale: number) {
 /** Width of the wordmark, and its height including the faces' overhang, the drop shadow and room to bounce. */
 export function logoSize(scale = 3, bounce = 3) {
   return {
-    w: WORDS.reduce((sum, word) => sum + wordWidth(word.parts, scale), 0) + WORD_GAP + 2,
-    h: Math.max(HEAD_SIZE, 5 * scale) + 2 + bounce * 2,
+    w: WORDS.reduce((sum, word) => sum + wordWidth(word.parts, scale), 0) + WORD_GAP + SHADOW,
+    h: Math.max(HEAD_SIZE, 5 * scale) + SHADOW + bounce * 2,
   };
 }
 
@@ -43,12 +69,12 @@ export function drawLogo(ctx: CanvasRenderingContext2D, x: number, y: number, op
     let cursor = x;
     WORDS.forEach((word, index) => {
       const offset = index === 0 ? bounce : -bounce;
-      const shift = pass === "shadow" ? 2 : 0;
+      const shift = pass === "shadow" ? SHADOW : 0;
       for (const part of word.parts) {
         if (isHead(part)) {
           drawHead(ctx, part, cursor + shift, y + headTop + offset + shift, pass === "shadow" ? { silhouette: INK } : { t: options.t });
         } else {
-          drawText(ctx, part, cursor + shift, y + offset + shift, pass === "shadow" ? INK : word.color, scale);
+          drawGlyphs(ctx, part, cursor + shift, y + offset + shift, pass === "shadow" ? INK : word.color, scale);
         }
         cursor += partWidth(part, scale);
       }
