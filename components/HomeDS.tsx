@@ -19,6 +19,7 @@ type Progress = {
   cards?: StageCard[];
   pick?: number;
   component?: string;
+  family?: "logic" | "numeric" | "visual";
   props?: PropSpec[];
 };
 
@@ -59,12 +60,52 @@ const INTRO: Line[] = [
   { who: "add", text: "Real code changes from out in the world. Tiny brain teasers. Pick one below!" },
 ];
 
+/**
+ * Rough progress while a puzzle is made: each stage owns a slice of the bar; inside the long modelling slice it creeps on
+ * an easing curve (never stalls, never hits 100% early). Durations are typical, not promises.
+ */
+const PROGRESS: Record<string, { label: string; from: number; to: number; seconds: number }> = {
+  start: { label: "STARTING", from: 0, to: 4, seconds: 3 },
+  fetch: { label: "FINDING PRS", from: 4, to: 16, seconds: 9 },
+  rank: { label: "RANKING", from: 16, to: 24, seconds: 5 },
+  model: { label: "MODELLING", from: 24, to: 94, seconds: 45 },
+  save: { label: "SAVING", from: 94, to: 100, seconds: 2 },
+};
+
+/** Banter for the long modelling wait: said only when nothing else is, about every 8s. What Gemini is doing depends on the kind. */
+function banter(family?: Progress["family"]): Line[] {
+  const specific: Line[] =
+    family === "numeric"
+      ? [
+          { who: "add", text: "It's a numbers one. Gemini's writing the old formula in Python, then the new one." },
+          { who: "del", text: "Now it runs both on every number in the range. Mine were fine, for the record." },
+          { who: "add", text: "Checking our rulebooks add up. Literally." },
+        ]
+      : family === "visual"
+        ? [
+            { who: "add", text: "It's a looks one. Gemini's drawing the screen the old way first. That's Red's look." },
+            { who: "del", text: "Classic look. Now it's drawing Green's. Same screen, smaller ego." },
+            { who: "add", text: "Checking our rulebooks match the pictures." },
+          ]
+        : [
+            { who: "add", text: "It's a logic one. Gemini's writing a little Python copy of Red. Flattering." },
+            { who: "del", text: "And one of Green. Then it runs us both on every combination of cases." },
+            { who: "add", text: "Now it's checking our rulebooks against the results. No shortcuts." },
+          ];
+  return [
+    ...specific,
+    { who: "del", text: "Picking the trickiest cases for you. You're welcome." },
+    { who: "add", text: "Still thinking. Big brains take a moment." },
+    { who: "del", text: "Almost there. Probably. Don't quote me." },
+    { who: "add", text: "If this takes much longer, Red's charging rent." },
+  ];
+}
+
 /** What the two say while a puzzle is being made. */
 function progressLine(event: Progress): Line | null {
   if (event.stage === "fetch" && event.status === "active") return { who: "del", text: "Grabbing fifty fresh pull requests made with AI coding tools..." };
   if (event.stage === "fetch" && event.status === "done") return { who: "add", text: `Got ${event.detail}. Let's see which one's the juiciest.` };
   if (event.stage === "rank" && event.status === "active") return { who: "del", text: "Gemini Decisions is scoring every one. Logic, size, who'd notice..." };
-  if (event.stage === "rank" && event.status === "done") return { who: "add", text: `Winner: ${event.detail}!` };
   if (event.stage === "model" && event.status === "active") return { who: "del", text: "Now running the old me and the new Green side by side. Every case." };
   if (event.stage === "model" && event.status === "done") return { who: "add", text: `Done: ${event.detail}.` };
   if (event.stage === "fmv" && event.status === "active") return { who: "add", text: "Meanwhile, we're shooting a little movie about it. Lights, camera..." };
@@ -120,11 +161,86 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
     [line],
   );
 
-  /** Appends a line and jumps to it (the index is clamped to the last line). */
-  function say(next: Line) {
+  /**
+   * Dialogue during generation is queued: each line stays up long enough to read (`hold` ms, by default its typing time plus a
+   * beat) before the next one, so fast steps don't flash by. Only the show waits; the pipeline runs at full speed.
+   */
+  const queue = useRef<Array<{ line: Line; hold: number; onShow?: () => void }>>([]);
+  const heldUntil = useRef(0);
+  const pumpTimer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (pumpTimer.current) window.clearTimeout(pumpTimer.current);
+  }, []);
+  function showLine(next: Line) {
     setLines((current) => [...current, next]);
     setIndex(Number.MAX_SAFE_INTEGER);
   }
+  function pump() {
+    if (pumpTimer.current) return;
+    const wait = heldUntil.current - performance.now();
+    if (wait > 0) {
+      pumpTimer.current = window.setTimeout(() => {
+        pumpTimer.current = null;
+        pump();
+      }, wait);
+      return;
+    }
+    const beat = queue.current.shift();
+    if (!beat) return;
+    showLine(beat.line);
+    beat.onShow?.();
+    heldUntil.current = performance.now() + beat.hold;
+    pump();
+  }
+  function say(next: Line, hold = (next.text.length / 48) * 1000 + 1400, onShow?: () => void) {
+    queue.current.push({ line: next, hold, onShow });
+    pump();
+  }
+  /** Skips the queue (final line, errors). */
+  function sayNow(next: Line) {
+    queue.current = [];
+    if (pumpTimer.current) window.clearTimeout(pumpTimer.current);
+    pumpTimer.current = null;
+    heldUntil.current = 0;
+    showLine(next);
+  }
+  // Progress while a puzzle is made: a stage-by-stage bar on the top screen, and banter during the long modelling wait.
+  const [progress, setProgress] = useState<{ stage: keyof typeof PROGRESS; since: number } | null>(null);
+  const [percent, setPercent] = useState(0);
+  const family = useRef<Progress["family"]>(undefined);
+  const STAGE_ORDER: Array<keyof typeof PROGRESS> = ["start", "fetch", "rank", "model", "save"];
+  function track(event: Progress) {
+    if (event.stage === "pick" && event.family) family.current = event.family;
+    if (event.status !== "active" || !(event.stage in PROGRESS)) return;
+    const next = event.stage as keyof typeof PROGRESS;
+    setProgress((current) => (current && STAGE_ORDER.indexOf(next) <= STAGE_ORDER.indexOf(current.stage) ? current : { stage: next, since: performance.now() }));
+  }
+  useEffect(() => {
+    if (!progress) return;
+    const slice = PROGRESS[progress.stage];
+    const update = () => {
+      const seconds = (performance.now() - progress.since) / 1000;
+      const eased = 1 - Math.exp(-seconds / (slice.seconds / 2));
+      setPercent(Math.min(slice.to - 0.5, slice.from + (slice.to - slice.from) * eased));
+    };
+    update();
+    const timer = window.setInterval(update, 300);
+    return () => window.clearInterval(timer);
+  }, [progress]);
+  const modelling = progress?.stage === "model";
+  useEffect(() => {
+    if (!modelling) return;
+    const lines = banter(family.current);
+    let next = 0;
+    // Only when nothing else is queued, and ~5s after the last line finished: company, not chatter.
+    const timer = window.setInterval(() => {
+      if (next >= lines.length || queue.current.length || performance.now() < heldUntil.current + 5000) return;
+      say(lines[next++]);
+    }, 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelling]);
+
 
   // Intro music: a random puzzle's soundtrack. Browsers only allow sound after a tap or key press, so it starts right away when
   // that already happened (e.g. back from a puzzle), otherwise on the first one, with a blinking "TAP TO START" until then.
@@ -181,14 +297,22 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
     stage.current.show = { mode: "fetching", cards: [], picked: null, headline: "", beat: false };
     const timers = steps.map(([at, event]) =>
       window.setTimeout(() => {
+        track(event);
         direct(event);
         const next = progressLine(event);
         if (next) say(next);
       }, at),
     );
-    timers.push(window.setTimeout(() => (stage.current.show = { ...stage.current.show!, mode: "done" }), 17000));
+    timers.push(
+      window.setTimeout(() => {
+        stage.current.show = { ...stage.current.show!, mode: "done" };
+        setProgress(null);
+      }, 17000),
+    );
     timers.push(window.setTimeout(() => (stage.current.show = { mode: "idle", cards: [], picked: null, headline: "", beat: false, props: DEMO_PROPS }), 21000));
     return () => timers.forEach((timer) => window.clearTimeout(timer));
+    // Mount-only: plays the sample show once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Drives the top-screen show from the server's progress events. */
@@ -196,7 +320,8 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
     const show = stage.current.show!;
     if (event.stage === "fetch" && event.status === "done") stage.current.show = { ...show, mode: "fetching", headline: `${event.detail?.toUpperCase() ?? ""} FOUND` };
     else if (event.stage === "rank" && event.status === "done" && event.cards) {
-      // The top five drop in with their scores, then a little timeline: read them, crown the winner, run the logic.
+      // The top five drop in with their scores and hop while it's read out; then a drawn-out reveal (Gemini Decisions is
+      // too quick to follow). The winner hops onto the stage exactly when it's named, then the modelling show starts.
       stage.current.show = { ...show, cards: event.cards, picked: null, mode: "fetching" };
       const land = (event.cards.length * 0.45 + 0.9) * 1000;
       const advance = (from: string[], to: "reading" | "picked" | "modelling", at: number) =>
@@ -205,8 +330,15 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
           if (current && from.includes(current.mode)) stage.current.show = { ...current, mode: to, ...(to === "picked" ? { picked: 0 } : {}) };
         }, at);
       advance(["fetching"], "reading", land);
-      advance(["fetching", "reading"], "picked", land + 2600);
-      advance(["fetching", "reading", "picked"], "modelling", land + 5200);
+      const top = event.cards[0];
+      const score = top.score !== undefined ? ` (${Math.round(top.score * 100)}%)` : "";
+      say({ who: "del", text: `Scores are in! ${event.cards.length > 1 ? "Only one" : "One"} gets to be today's puzzle...` }, 3000);
+      say({ who: "add", text: "And the winner is..." }, 2600, () => sfx.drumroll());
+      say({ who: "add", text: `${top.repository} #${top.number}${score}! "${top.title}"` }, 4400, () => {
+        sfx.found();
+        advance(["fetching", "reading"], "picked", 0);
+        advance(["fetching", "reading", "picked"], "modelling", 4200);
+      });
     } else if (event.stage === "pick" && event.status === "done") stage.current.show = { ...stage.current.show!, headline: event.component ?? "" };
     else if (event.stage === "music") {
       // The generated props arrive with the music events and pop onto the stage.
@@ -219,6 +351,9 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
     sfx.select();
     setBusy(true);
     setError("");
+    family.current = undefined;
+    setPercent(0);
+    setProgress({ stage: "start", since: performance.now() });
     stage.current.show = { mode: "fetching", cards: [], picked: null, headline: "", beat: false };
     say({ who: "add", text: "A new one? On it." });
     try {
@@ -241,10 +376,12 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
           if (!part.trim()) continue;
           const message = JSON.parse(part) as Progress | { type: "done"; puzzle: Puzzle } | { type: "error"; message: string };
           if (message.type === "stage") {
+            track(message);
             direct(message);
             const next = progressLine(message);
-            if (next) say(next);
+            if (next) (message.stage === "save" ? sayNow : say)(next);
           } else if (message.type === "done") {
+            setProgress(null);
             sfx.found();
             stage.current.show = { ...stage.current.show!, mode: "done" };
             // Let the confetti land before leaving.
@@ -261,7 +398,8 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
       const message = reason instanceof Error ? reason.message : "Something went wrong.";
       setError(message);
       stage.current.show = { ...stage.current.show!, mode: "error", headline: message };
-      say({ who: "del", text: `Ugh. ${message}` });
+      setProgress(null);
+      sayNow({ who: "del", text: `Ugh. ${message}` });
       setBusy(false);
     }
   }
@@ -271,7 +409,16 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
       top={
         <>
           <PS1Stage state={stage} />
-          {hasTracks && !musicOn && <span className="press-start">▶ TAP TO START ♪</span>}
+          {hasTracks && !musicOn && !progress && <span className="press-start">▶ TAP TO START ♪</span>}
+          {progress && (
+            <div className="gen-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(percent)} aria-label="Making a puzzle">
+              <span>{PROGRESS[progress.stage].label}</span>
+              <span className="gen-bar">
+                <i style={{ width: `${Math.floor(percent / 5) * 5}%` }} />
+              </span>
+              <span>{Math.floor(percent)}%</span>
+            </div>
+          )}
           <TextBox
             line={line}
             onTyping={onTyping}

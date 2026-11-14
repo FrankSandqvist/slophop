@@ -39,16 +39,35 @@ type Pull = {
  * Recent merged public PRs made with AI coding tools, found by each tool's own signature. Search matches loosely, so every
  * loaded PR is checked again with `madeWithTool` and dropped unless it really carries a signature.
  */
-const SEARCHES = [
-  'fix in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
-  'edge case in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
-  'fix in:title author:app/copilot-swe-agent is:pr is:public is:merged',
-  'fix in:title "chatgpt.com/codex/tasks" in:body is:pr is:public is:merged',
-  'fix in:title author:app/devin-ai-integration is:pr is:public is:merged',
-  'fix in:title author:app/google-labs-jules is:pr is:public is:merged',
-  'fix in:title "Made with Cursor" in:body is:pr is:public is:merged',
-  'validation in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
-];
+const SEARCHES = {
+  /** Fixes in general: mostly logic. */
+  general: [
+    'fix in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'edge case in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'fix in:title author:app/copilot-swe-agent is:pr is:public is:merged',
+    'fix in:title "chatgpt.com/codex/tasks" in:body is:pr is:public is:merged',
+    'fix in:title author:app/devin-ai-integration is:pr is:public is:merged',
+    'fix in:title author:app/google-labs-jules is:pr is:public is:merged',
+    'fix in:title "Made with Cursor" in:body is:pr is:public is:merged',
+    'validation in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+  ],
+  /** Calculations: prices, rounding, limits. */
+  numeric: [
+    'rounding in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'calculation in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'price in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'limit in:title author:app/copilot-swe-agent is:pr is:public is:merged',
+    'total in:title "chatgpt.com/codex/tasks" in:body is:pr is:public is:merged',
+  ],
+  /** Looks: layout, CSS, small screens. */
+  visual: [
+    'layout in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'css in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'mobile in:title "Generated with Claude Code" in:body is:pr is:public is:merged',
+    'layout in:title author:app/copilot-swe-agent is:pr is:public is:merged',
+    'overflow in:title "Made with Cursor" in:body is:pr is:public is:merged',
+  ],
+};
 
 /** The AI tool a PR says made it, from its own signature only: agent author accounts, footers, Codex task links. */
 export function madeWithTool(pull: { body: string | null; user: { login: string }; labels?: Array<{ name: string }> }): string | null {
@@ -63,7 +82,7 @@ export function madeWithTool(pull: { body: string | null; user: { login: string 
   return null;
 }
 
-const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php|cs|swift|c|cc|cpp|h)$/i;
+const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php|cs|swift|c|cc|cpp|h|css|scss|sass|less|vue|svelte|html|astro)$/i;
 const NOISE_FILE = /(lock|\.min\.|snap|generated|dist\/|vendor\/|__snapshots__|\.d\.ts$)/i;
 const MAX_DIFF_CHARS = 9_000;
 const MAX_CONTEXT_CHARS = 6_000;
@@ -99,14 +118,17 @@ export function parsePullUrl(input: string) {
   return { owner: match[1], repo: match[2], number: Number(match[3]) };
 }
 
-/** Rough "how much branching logic is in here" score, used to prefer puzzle-worthy PRs. */
+/** Rough "is there a puzzle in here" score: branching logic, arithmetic, or layout/styling changes. */
 function logicScore(files: PullFile[]) {
   const code = files.filter((file) => CODE_FILE.test(file.filename) && !NOISE_FILE.test(file.filename) && file.patch);
   const changed = code.reduce((sum, file) => sum + file.additions + file.deletions, 0);
   if (!code.length || changed < 6 || changed > 500) return 0;
   const patch = code.map((file) => file.patch).join("\n");
-  const branches = (patch.match(/^[+-].*(\bif\b|\belse\b|\?|&&|\|\||\bswitch\b|\bcase\b|[<>]=?|===?|!==?|\bmatch\b)/gm) ?? []).length;
-  return branches * 10 + Math.min(changed, 120);
+  const count = (pattern: RegExp) => (patch.match(pattern) ?? []).length;
+  const branches = count(/^[+-].*(\bif\b|\belse\b|\?|&&|\|\||\bswitch\b|\bcase\b|[<>]=?|===?|!==?|\bmatch\b)/gm);
+  const maths = count(/^[+-].*(Math\.|\bround|\bfloor|\bceil|\bclamp|\bmin\(|\bmax\(|\d\.\d|\d+\s*[*/%]|[*/%]\s*\d)/gm);
+  const looks = count(/^[+-].*(\b(margin|padding|width|height|gap|flex|grid|font-size|color|background|overflow|wrap|z-index|display|position)\b|\d+(px|rem|em|vh|vw|%)\b|@media)/gm);
+  return branches * 10 + maths * 6 + looks * 6 + Math.min(changed, 120);
 }
 
 function buildDiff(files: PullFile[]) {
@@ -228,7 +250,9 @@ export async function getPullRequest(url: string): Promise<PullRequestSource> {
 export async function findCandidatePullRequests(count = 50): Promise<PullRequestSource[]> {
   // Four searches of 100 (the max per page), at most two at a time: GitHub's search API has a burst ("secondary") limit
   // that parallel searches trip easily.
-  const queries = [...SEARCHES].sort(() => Math.random() - 0.5).slice(0, 4);
+  // Two general searches plus one aimed at numbers and one at looks, so every kind of puzzle has candidates.
+  const shuffled = (list: string[]) => [...list].sort(() => Math.random() - 0.5);
+  const queries = [...shuffled(SEARCHES.general).slice(0, 2), shuffled(SEARCHES.numeric)[0], shuffled(SEARCHES.visual)[0]];
   const searched = await settleLimited(queries, 2, (query) =>
     gh<{ items: SearchItem[] }>(`/search/issues?q=${encodeURIComponent(query)}&sort=updated&order=desc&per_page=100&page=${1 + Math.floor(Math.random() * 2)}`).then((result) => result.items),
   );

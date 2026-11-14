@@ -2,10 +2,23 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import { MODELS, decide, generateJson, generateMusic, generateVideo, type DecisionQuestion } from "./gemini";
 import { addContext, findCandidatePullRequests, getPullRequest, type PullRequestSource } from "./github";
+import {
+  buildNumericRounds,
+  buildVisualRounds,
+  numericPrompt,
+  numericSchema,
+  validateNumeric,
+  validateVisual,
+  visualPrompt,
+  visualSchema,
+  type CommonDesign,
+  type NumericDesign,
+  type VisualDesign,
+} from "./families";
 import { settleLimited } from "./limit";
 import { mascotReferences } from "./sprites";
 import { listFiles, readText, saveFile } from "./storage";
-import { rowKey, type FmvLine, type PropSpec, type Puzzle, type PuzzleInput, type PuzzleOutcome, type PuzzleRow, type Round, type StageCard, type VoteTally } from "./types";
+import { rowKey, type FmvLine, type NumericModel, type PropSpec, type PuzzleFamily, type VisualModel, type Puzzle, type PuzzleInput, type PuzzleOutcome, type PuzzleRow, type Round, type StageCard, type VoteTally } from "./types";
 
 export type { Puzzle } from "./types";
 
@@ -27,6 +40,8 @@ export type ProgressEvent =
       /** pick/done: index of the chosen PR, and the piece of logic. */
       pick?: number;
       component?: string;
+      /** pick/done: the kind of puzzle being made. */
+      family?: PuzzleFamily;
       /** music/active: the generated stage props. */
       props?: PropSpec[];
     }
@@ -40,11 +55,21 @@ export const isPuzzleId = (id: string) => ID_PATTERN.test(id);
 
 /** Calibrated questions asked about every candidate PR (one fast Decisions call each, in parallel). */
 const RANK_QUESTIONS: Record<string, DecisionQuestion> = {
-  logic: {
+  worth: {
     type: "score",
     instructions:
-      "This is a GitHub pull request. How much clear decision logic does it change that a curious non-coder could reason about: conditions, limits, thresholds, edge cases, what happens when?",
-    criteria: ["None: docs, styling, renames, config or dependency bumps", "A little logic", "Some clear decisions", "A crisp decision with interesting edge cases"],
+      "This is a GitHub pull request. How much does it change something a curious non-coder could reason about: a decision (what happens when), a number (a price, fee, limit, rounding, size, timing) or a look (layout, sizes, colours, what shows or hides)?",
+    criteria: ["Nothing: docs, renames, config, dependency bumps or tests", "A little", "A clear change", "A crisp change with interesting edge cases"],
+  },
+  kind: {
+    type: "choice",
+    instructions: "Which kind of brain teaser would this change make best?",
+    criteria: {
+      logic: "Logic: conditions or limits decide what happens (accept or reject, allow or block, show or hide, which path is taken)",
+      numeric: "Numbers: a calculated amount changes (a price, fee, total, discount, rounding, duration, score or size worked out from other numbers)",
+      visual: "Looks: how something on screen looks or is laid out changes (sizes, spacing, wrapping, colours, what shows or hides)",
+      none: "None of these: refactors, docs, tooling, tests or dependencies",
+    },
   },
   small: {
     type: "score",
@@ -60,7 +85,9 @@ const RANK_QUESTIONS: Record<string, DecisionQuestion> = {
   noise: { type: "noul", instructions: "Is this change mostly noise: only tests, formatting, generated files, version bumps or comments?" },
 };
 
-/** 0..1: how good a SlopHop puzzle this PR would make. Null when the Decisions call failed. */
+type Fit = Record<PuzzleFamily, number>;
+
+/** 0..1: how good a SlopHop puzzle this PR would make, and how well it fits each kind of puzzle. */
 async function rankScore(pr: PullRequestSource, signal?: AbortSignal) {
   const input = `${pr.repository}#${pr.number}: ${pr.title}\n\n${pr.body.slice(0, 800)}\n\nDIFF:\n${pr.diff.slice(0, 6000)}`;
   const answers = await decide(input, RANK_QUESTIONS, signal);
@@ -72,17 +99,56 @@ async function rankScore(pr: PullRequestSource, signal?: AbortSignal) {
     const answer = answers[key];
     return answer?.type === "noul" ? answer.noul : 0;
   };
-  return Math.max(0, 0.35 * level("logic") + 0.25 * level("small") + 0.25 * level("relatable") + 0.15 * yes("plain") - 0.4 * yes("noise"));
+  const kind = answers.kind;
+  const probabilities = kind?.type === "choice" ? kind.probabilities : {};
+  const fit: Fit = { logic: probabilities.logic ?? 0, numeric: probabilities.numeric ?? 0, visual: probabilities.visual ?? 0 };
+  const score = Math.max(0, 0.35 * level("worth") + 0.25 * level("small") + 0.25 * level("relatable") + 0.15 * yes("plain") - 0.4 * yes("noise"));
+  return { score, fit };
+}
+
+/** How often each kind of puzzle is aimed for, so the puzzle list gets variety. */
+const FAMILY_WEIGHTS: Fit = { logic: 0.4, numeric: 0.3, visual: 0.3 };
+
+/**
+ * Aims for a random kind of puzzle and takes the best PR that fits it (a clear fit, and not much worse than the best PR).
+ * Falls back to the best PR overall, as whatever kind it fits best.
+ */
+function chooseCandidate(ranked: Array<{ score: number | null; fit: Fit | null }>): { index: number; family: PuzzleFamily } {
+  const best = ranked[0]?.score;
+  if (best === null || best === undefined) return { index: 0, family: "logic" };
+  let roll = Math.random();
+  // PUZZLE_FAMILY=numeric|visual|logic forces the aim (testing); otherwise it's drawn by FAMILY_WEIGHTS.
+  const forced = process.env.PUZZLE_FAMILY as PuzzleFamily | undefined;
+  const target = forced && forced in FAMILY_WEIGHTS ? forced : ((Object.keys(FAMILY_WEIGHTS) as PuzzleFamily[]).find((family) => (roll -= FAMILY_WEIGHTS[family]) < 0) ?? "logic");
+  let index = -1;
+  let value = 0;
+  ranked.forEach((entry, i) => {
+    const fit = entry.fit?.[target] ?? 0;
+    if (entry.score === null || fit < 0.45 || entry.score < best * 0.6) return;
+    if (entry.score * fit > value) {
+      value = entry.score * fit;
+      index = i;
+    }
+  });
+  if (index >= 0) return { index, family: target };
+  const fit = ranked[0].fit;
+  const family = fit ? (Object.keys(fit) as PuzzleFamily[]).sort((a, b) => fit[b] - fit[a])[0] : "logic";
+  return { index: 0, family: fit && fit[family] > 0.3 ? family : "logic" };
 }
 
 /** Scores every candidate in parallel and returns them best first (falls back to the GitHub heuristic order). */
 async function rankCandidates(candidates: PullRequestSource[], signal?: AbortSignal) {
-  if (candidates.length === 1) return [{ pr: candidates[0], score: null as number | null }];
-  // At most 10 Decisions calls at once, so 50 candidates don't trip Gemini's request rate limit.
+  // At most 10 Decisions calls at once, so 50 candidates don't trip Gemini's request rate limit. A single pasted PR is
+  // still scored: that tells us which kind of puzzle it makes.
   const scores = await settleLimited(candidates, 10, (pr) => rankScore(pr, signal));
   const ranked = candidates.map((pr, index) => {
     const result = scores[index];
-    return { pr, score: result.status === "fulfilled" ? result.value : null, order: index };
+    return {
+      pr,
+      score: result.status === "fulfilled" ? result.value.score : (null as number | null),
+      fit: result.status === "fulfilled" ? result.value.fit : (null as Fit | null),
+      order: index,
+    };
   });
   if (ranked.every((entry) => entry.score === null)) {
     console.error("Gemini Decisions ranking failed; using the heuristic order", scores.find((result) => result.status === "rejected"));
@@ -591,7 +657,7 @@ function makeEdge(table: PuzzleRow[], inputs: PuzzleInput[]): Extract<Round, { k
  * Rounds, built by our code from the table (never by the model). Each is ONE decision that fits the screen and can be
  * reasoned out from the rulebooks: open on an applied rule, find where the change bites, a shuffled mix, try to break it.
  */
-function buildRounds(table: PuzzleRow[], outcomes: PuzzleOutcome[], inputs: PuzzleInput[]): Round[] {
+export function buildRounds(table: PuzzleRow[], outcomes: PuzzleOutcome[], inputs: PuzzleInput[]): Round[] {
   const changed = shuffle(table.filter((row) => row.old !== row.new));
   const same = shuffle(table.filter((row) => row.old === row.new));
   const opener: Round[] = [];
@@ -667,20 +733,33 @@ const HEDGE_MS = Number(process.env.MODEL_HEDGE_MS || 40_000);
  * Code-execution turns vary a lot in length. Start the primary model; if it hasn't answered after HEDGE_MS (or fails),
  * start a fast backup in parallel and take the first VALID answer. The loser is aborted (we stop polling it).
  */
-async function modelHedged(pr: PullRequestSource, focus: string, signal?: AbortSignal) {
-  const prompt = modelPrompt(pr, focus);
+type Modelled =
+  | { family: "logic"; inputs: PuzzleInput[]; outcomes: PuzzleOutcome[]; table: PuzzleRow[] }
+  | { family: "numeric"; numeric: NumericModel }
+  | { family: "visual"; visual: VisualModel };
+
+/** Per kind of puzzle: what to ask, the answer's shape, whether it runs Python, and how we check the answer. */
+const DESIGNS: Record<PuzzleFamily, { prompt: (pr: PullRequestSource) => string; schema: Record<string, unknown>; python: boolean; check: (data: never) => Modelled }> = {
+  logic: { prompt: (pr) => modelPrompt(pr, FOCUS), schema, python: true, check: (data: Design) => ({ family: "logic", ...validate(data) }) },
+  numeric: { prompt: numericPrompt, schema: numericSchema, python: true, check: (data: NumericDesign) => ({ family: "numeric", numeric: validateNumeric(data) }) },
+  visual: { prompt: visualPrompt, schema: visualSchema, python: false, check: (data: VisualDesign) => ({ family: "visual", visual: validateVisual(data) }) },
+};
+
+async function modelHedged(pr: PullRequestSource, family: PuzzleFamily, signal?: AbortSignal) {
+  const design = DESIGNS[family];
+  const prompt = design.prompt(pr);
   const controllers: AbortController[] = [];
   const run = (model: string, thinking: string) => {
     const controller = new AbortController();
     controllers.push(controller);
-    return generateJson<Design>({
+    return generateJson<CommonDesign>({
       model,
       prompt,
-      schema,
-      tools: [{ type: "code_execution" }],
+      schema: design.schema,
+      tools: design.python ? [{ type: "code_execution" }] : [],
       thinking,
       signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
-    }).then(({ data, model: used }) => ({ data, model: used, ...validate(data) }));
+    }).then(({ data, model: used }) => ({ data, model: used, result: design.check(data as never) }));
   };
 
   return new Promise<Awaited<ReturnType<typeof run>>>((resolve, reject) => {
@@ -737,7 +816,10 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
 
   // Step 1: Gemini Decisions scores every candidate; the best one wins.
   emit({ type: "stage", stage: "rank", status: "active", detail: `Scoring ${candidates.length} with Gemini Decisions` });
-  const ranked = await rankCandidates(candidates, signal);
+  const scored = await rankCandidates(candidates, signal);
+  // Aim for a kind of puzzle (variety) and put the PR chosen for it first: everything below uses ranked[0].
+  const chosen = chooseCandidate(scored);
+  const ranked = [scored[chosen.index], ...scored.filter((_, index) => index !== chosen.index)];
   const top = ranked.slice(0, 5);
   emit({
     type: "stage",
@@ -769,7 +851,8 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
   // The cutscene: as soon as its script is written, Gemini Omni films it (360p) with the real mascots as references.
   const fmvTask = flairTask
     .then(async (flair): Promise<Puzzle["fmv"]> => {
-      if (flair.fmv.length < 2) return null;
+      // FMV=off skips the cutscene (e.g. for test runs: it's the priciest part).
+      if (flair.fmv.length < 2 || process.env.FMV === "off") return null;
       emit({ type: "stage", stage: "fmv", status: "active" });
       const video = await generateVideo({
         prompt: fmvPrompt(ranked[0].pr, flair.fmv),
@@ -788,13 +871,31 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
     });
 
   const pr = await addContext(ranked[0].pr);
-  const choice = { reason: ranked[0].score !== null ? `Gemini Decisions ranked it best of ${candidates.length} (${Math.round(ranked[0].score * 100)}%).` : "Best by logic heuristic." };
-  emit({ type: "stage", stage: "pick", status: "done", detail: `${pr.repository}#${pr.number} · ${pr.title}`, pick: 0, component: pr.title });
+  const kindName = { logic: "logic", numeric: "numbers", visual: "looks" }[chosen.family];
+  const choice = {
+    reason:
+      ranked[0].score !== null
+        ? `Gemini Decisions picked it from ${candidates.length} as a ${kindName} puzzle (${Math.round(ranked[0].score * 100)}%).`
+        : "Best by the GitHub heuristic.",
+  };
+  emit({ type: "stage", stage: "pick", status: "done", detail: `${pr.repository}#${pr.number} · ${pr.title}`, pick: 0, component: pr.title, family: chosen.family });
 
   // Step 2: model that one piece with code execution, on the chosen PR only (hedged against slow runs).
   emit({ type: "stage", stage: "model", status: "active" });
-  const { data, model, inputs, outcomes, table } = await modelHedged(pr, FOCUS, signal);
-  emit({ type: "stage", stage: "model", status: "done", detail: `${table.length} cases · ${table.filter((row) => row.old !== row.new).length} changed` });
+  // A numbers or looks design that doesn't hold up falls back to a logic puzzle of the same PR.
+  const modelled = await modelHedged(pr, chosen.family, signal).catch((error: unknown) => {
+    if (chosen.family === "logic") throw error;
+    console.warn(`The ${chosen.family} design failed; falling back to logic`, error);
+    return modelHedged(pr, "logic", signal);
+  });
+  const { data, model, result } = modelled;
+  const detail =
+    result.family === "logic"
+      ? `${result.table.length} cases · ${result.table.filter((row) => row.old !== row.new).length} changed`
+      : result.family === "numeric"
+        ? `${result.numeric.points.length} numbers · ${result.numeric.points.filter((point) => point.old !== point.new).length} changed`
+        : `${result.visual.states.length} situations`;
+  emit({ type: "stage", stage: "model", status: "done", detail });
 
   const [musicFile, flair, fmv] = await Promise.all([musicTask, flairTask, fmvTask]);
   emit({ type: "stage", stage: "save", status: "active" });
@@ -816,10 +917,18 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
     },
     component: { name: String(data.component?.name ?? ""), what: String(data.component?.what ?? ""), file: String(data.component?.file ?? "") },
     lines: { add: String(data.lines?.add ?? ""), del: String(data.lines?.del ?? "") },
-    inputs,
-    outcomes,
-    table,
-    rounds: buildRounds(table, outcomes, inputs),
+    family: result.family,
+    inputs: result.family === "logic" ? result.inputs : [],
+    outcomes: result.family === "logic" ? result.outcomes : [],
+    table: result.family === "logic" ? result.table : [],
+    ...(result.family === "numeric" ? { numeric: result.numeric } : {}),
+    ...(result.family === "visual" ? { visual: result.visual } : {}),
+    rounds:
+      result.family === "logic"
+        ? buildRounds(result.table, result.outcomes, result.inputs)
+        : result.family === "numeric"
+          ? buildNumericRounds(result.numeric)
+          : buildVisualRounds(result.visual),
     code: resolveCode(data.codeAnchor, pr.diff),
     props: flair.props,
     musicStyle: flair.music,

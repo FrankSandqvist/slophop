@@ -5,8 +5,11 @@ Keep this file current as SlopHop evolves. It describes what is true now.
 ## Product
 
 SlopHop shows curious people what is changing in the public software around them, as tiny brain teasers.
-Every puzzle is built from one real, public GitHub pull request, cut down to one small piece of logic, so players'
-answers and votes can be crowdsourced per case.
+Every puzzle is built from one real, public GitHub pull request, cut down to one small change, so players'
+answers and votes can be crowdsourced per case. Three kinds ("families", `lib/families.ts` for the last two):
+- **logic** — conditions decide an outcome (truth table).
+- **numeric** — a calculation over one real input (price, fee, rounding, duration...), sampled by running Python.
+- **visual** — how a small screen looks before/after in 3-4 situations, described as shapes and drawn by our `MockScreen`.
 
 Two mascots star in everything:
 - **Green** = code the PR **added**.
@@ -27,7 +30,9 @@ Everything that can run in parallel does:
    `lib/limit.ts`; ~140 GitHub calls of the 5,000/hour budget), top 50 by a branching-logic heuristic (no surrounding code yet). A pasted PR URL skips this. (~8s)
 2. **Rank with the Gemini Decisions API** (`gemini-decision-1`, `POST /v1beta/decisions`, `decide()` in `lib/gemini.ts`): one call
    per candidate, 10 at a time, asking calibrated rubric/yes-no questions (logic, small & self-contained, relatable, plain,
-   noise). Combined into a 0–1 score; best wins. Falls back to the heuristic order if the API fails. (a few seconds for 50)
+   noise) plus which kind of puzzle it makes (`kind`: logic / numeric / visual / none). Combined into a 0–1 score.
+   `chooseCandidate` aims for a random kind (`FAMILY_WEIGHTS` 40/30/30; `PUZZLE_FAMILY` env forces one for tests) and takes
+   the best PR that clearly fits it, else the best PR overall as its own kind. Falls back to the heuristic order if the API fails. (a few seconds for 50)
 3. **In parallel from here:** `designFlair` (`gemini-4-hydrogen`, low thinking) writes the project's music line (lead
    instrument and sounds, ≤40 words), picks a tempo that fits the project (76–132 BPM, saved as `bpm`) and two **props** built from PS1 primitives (`PropSpec`: box/cylinder/sphere/cone/torus parts,
    clamped by `cleanProps`); then Lyria composes the loop (`composeMusic`): that line up front over the same base every time (90s
@@ -37,7 +42,8 @@ Everything that can run in parallel does:
    reference images (`lib/sprites.ts` renders them to PNG), timecoded from the beats, no on-screen text. The prompt
    insists the mascots are a head on one stick leg (no arms, hands, torso or second leg) and act with their heads. (~40s, runs alongside
    the modelling; saved as `fmv.mp4`.) Meanwhile `addContext()` loads the code around the winner's changes.
-4. **Model** (`gemini-4-argon`, background interaction, `code_execution` + JSON schema): picks the smallest meaningful decision,
+4. **Model** (`gemini-4-argon`, background interaction, JSON schema; `DESIGNS` picks prompt/schema/validator per kind; numeric
+   and logic use `code_execution`). A numeric/visual design that fails validation falls back to logic. For logic it picks the smallest meaningful decision,
    writes **rulebooks** (Red's old rules, Green's new rules, plain "If…, then…" lines that let a player derive every case), the
    scene (`where`, `scenario`, condition explanations, a story phrase per value), and fills the full truth table by **running
    Python** old()/new() models. **Hedged:** if Argon hasn't answered in 40s (or fails), `gemini-4-hydrogen` starts in parallel and
@@ -45,7 +51,9 @@ Everything that can run in parallel does:
 5. Our code validates the table, cuts the real diff lines (`resolveCode`) and **builds the rounds itself** (`buildRounds`).
    Gemini never writes UI, styles or game code. Saved as `puzzles/{id}/meta.json` (+ `music.mp3`), `format: 6`.
 
-Progress events carry the top-5 ranked cards (with scores) and drive the top-screen show. A run takes ~60s (the cutscene finishes last).
+Progress events carry the top-5 ranked cards (with scores) and drive the top-screen show. The home screen shows a stage
+progress bar (`PROGRESS`), queues dialogue so every line can be read, stages a drawn-out winner reveal, and fills the long
+modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap test runs). A run takes ~60s (the cutscene finishes last).
 
 ## Playing
 
@@ -79,6 +87,11 @@ Progress events carry the top-5 ranked cards (with scores) and drive the top-scr
   for `who`) above a case box tagged THE CASE. If a step would overflow, PlayDS adds `.dense` (tighter padding), then `.no-rules`
   (the bubble becomes a one-line "tap to read" strip), then `.denser` (drops the strip and `.can-hide`, e.g. one spare pattern row).
   `/play/{id}?round=N` jumps to step N; `&qa` logs whether the step overflows (`&qa=answer` also auto-answers).
+- Numeric steps (`components/Families.tsx`): `num-predict` (key Green's/Red's result into a Brain Age style `Keypad`),
+  `num-diff` (how much more Green gives), `num-split` / `num-reach` (drag a marker along the `NumberLine` pixel chart: where
+  Green starts to differ, where it first hits a target; Green's line appears after answering).
+- Visual steps: `vis-which` (two mock screens: which is Green's?) and `vis-spot` (tap what changed in Green's picture; then it
+  flips between before and after with the change outlined). One step per situation (seeing both gives the next answer away).
 - Crowd signal: after each reveal, "Is Green's way right for this case?" → `votes/{id}/{rowKey}/{right|off}/{ts}.json`.
 
 ## Enforced components and style
@@ -133,5 +146,6 @@ npm run build
 ## Known gaps
 
 - No rate limiting on generation or votes.
-- The truth table is only as faithful as Gemini's Python model of the diff; nothing cross-checks it against the real code.
+- The truth table / sampled numbers are only as faithful as Gemini's Python model of the diff; nothing cross-checks them.
+- Visual puzzles are Gemini's reading of CSS/markup drawn as shapes; nothing renders the real code.
 - Puzzles where nothing changes behaviour (pure refactors) produce weaker rounds.

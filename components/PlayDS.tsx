@@ -4,8 +4,9 @@ import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MascotKind, MascotMood } from "@/lib/mascot";
 import { playLoop, setMuted, sfx } from "@/lib/sound";
-import { outcome, storyOf, valueLabel, voteRow, type Puzzle, type PuzzleRow, type Round, type VoteTally } from "@/lib/types";
+import { caseLabel, formatNumber, numericRow, outcome, pointAt, roundTo, storyOf, valueLabel, visualRow, voteRow, type Puzzle, type PuzzleRow, type Round, type VoteTally } from "@/lib/types";
 import { Fmv } from "./Fmv";
+import { Keypad, NumberCase, NumberLine, NumberResults, VisualSpot, VisualWhich } from "./Families";
 import { DSShell, TextBox, type Line } from "./DS";
 import { PS1Stage, type StageState } from "./PS1Stage";
 import {
@@ -44,9 +45,12 @@ function claimText(puzzle: Puzzle, round: Extract<Round, { kind: "claim" }>) {
   return `When ${input?.label.toLowerCase()} is "${valueLabel(puzzle, round.input, round.value)}", Green always ends at "${outcome(puzzle, round.outcome)?.label}".`;
 }
 
+const stateOf = (puzzle: Puzzle, id: string) => puzzle.visual?.states.find((state) => state.id === id);
+
 /** Whose rules a step is about: Red's for "what did Red do", both when you must tell them apart, else Green's. */
 function rulesFor(round: Round): Array<"old" | "new"> {
-  if (round.kind === "who") return ["old", "new"];
+  if (["who", "num-diff", "num-split", "vis-which", "vis-spot"].includes(round.kind)) return ["old", "new"];
+  if (round.kind === "num-predict" && round.side === "old") return ["old"];
   if (round.kind === "predict" && round.side === "old") return ["old"];
   return ["new"];
 }
@@ -72,6 +76,18 @@ function goalOf(puzzle: Puzzle, round: Round) {
       return "Which one thing decides it here?";
     case "claim":
       return "True or false?";
+    case "num-predict":
+      return `${round.side === "new" ? "Green's" : "Red's"} ${puzzle.numeric?.output.label.toLowerCase()}? Key it in`;
+    case "num-diff":
+      return "How much more does Green give? Key it in";
+    case "num-split":
+      return "Drag to where Green starts to differ";
+    case "num-reach":
+      return `Drag to where Green first hits ${formatNumber(round.target, puzzle.numeric?.output.unit ?? "", puzzle.numeric?.output.decimals)}`;
+    case "vis-which":
+      return "Which picture is Green's?";
+    case "vis-spot":
+      return "Tap what changed in Green's picture";
   }
 }
 
@@ -103,6 +119,27 @@ function roundLine(puzzle: Puzzle, round: Round): Line {
       return { who: "del", text: `Picture it: ${story(round.row)}. Only ONE of those things decides what Green does. Which?` };
     case "claim":
       return { who: "del", text: `I reckon: ${claimText(puzzle, round)} True or false?` };
+    case "num-predict": {
+      const model = puzzle.numeric!;
+      const at = `${model.input.label}: ${formatNumber(round.x, model.input.unit)}.`;
+      return round.side === "new"
+        ? { who: "add", text: `${at} Use my rules: what's my ${model.output.label.toLowerCase()}? Key it in.` }
+        : { who: "del", text: `${at} Before the change, I was in charge. What was my ${model.output.label.toLowerCase()}?` };
+    }
+    case "num-diff": {
+      const model = puzzle.numeric!;
+      return { who: "del", text: `${model.input.label}: ${formatNumber(round.x, model.input.unit)}. How much more do you get from Green than from me? If it's less, key in a minus.` };
+    }
+    case "num-split":
+      return { who: "add", text: "Red's line is drawn in. Slide along it to the first spot where my result comes out different." };
+    case "num-reach": {
+      const model = puzzle.numeric!;
+      return { who: "add", text: `Slide along: what's the smallest ${model.input.label.toLowerCase()} where my ${model.output.label.toLowerCase()} hits ${formatNumber(round.target, model.output.unit, model.output.decimals)}?` };
+    }
+    case "vis-which":
+      return { who: "del", text: `Picture it: ${stateOf(puzzle, round.state)?.story ?? ""}. One of these is me, one is Green. Which is Green's?` };
+    case "vis-spot":
+      return { who: "add", text: `Picture it: ${stateOf(puzzle, round.state)?.story ?? ""}. This is me now. Tap the part that changed.` };
   }
 }
 
@@ -188,6 +225,12 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
         rule: () => (round.kind === "rule" ? puzzle.inputs[round.input].values[0].id : ""),
         pivot: () => "0",
         claim: () => "true",
+        "num-predict": () => "0",
+        "num-diff": () => "0",
+        "num-split": () => String(puzzle.numeric?.points[0].x ?? 0),
+        "num-reach": () => String(puzzle.numeric?.points[0].x ?? 0),
+        "vis-which": () => "a",
+        "vis-spot": () => "none",
       };
       window.setTimeout(() => answer(first[round.kind]()), 300);
     }
@@ -324,6 +367,33 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
         const label = puzzle.inputs[round.input].label.toLowerCase();
         return finish(rowOf(puzzle, round.row), correct, correct ? speak(`Right: ${label} is what flips me.`) : speak(`Changing that does nothing here. It's ${label}.`, "del"));
       }
+      case "num-predict":
+      case "num-diff": {
+        const model = puzzle.numeric!;
+        const point = pointAt(model, round.x)!;
+        const truth = round.kind === "num-diff" ? roundTo(point.new - point.old, model.output.decimals) : round.side === "new" ? point.new : point.old;
+        const correct = Math.abs(Number(choice) - truth) < 0.5 * 10 ** -model.output.decimals;
+        const said = formatNumber(truth, model.output.unit, model.output.decimals);
+        const who: MascotKind = round.kind === "num-predict" && round.side === "old" ? "del" : "add";
+        return finish(numericRow(model, round.x), correct, correct ? speak(`Spot on: ${said}.`, who) : speak(`Not quite. It's ${said}.`, who));
+      }
+      case "num-split":
+      case "num-reach": {
+        const model = puzzle.numeric!;
+        const correct = Number(choice) === round.answer;
+        const at = formatNumber(round.answer, model.input.unit);
+        return finish(numericRow(model, round.answer), correct, correct ? speak(`Exactly: ${at}. That's where the change kicks in.`) : speak(`It's at ${at}. See my line now.`, "del"));
+      }
+      case "vis-which": {
+        const state = stateOf(puzzle, round.state)!;
+        const correct = (choice === "a") === round.greenFirst;
+        return finish(visualRow(state), correct, correct ? speak("That's me! The change is outlined.") : speak("Nope, that one's mine. The old look.", "del"));
+      }
+      case "vis-spot": {
+        const state = stateOf(puzzle, round.state)!;
+        const correct = state.changed.includes(choice);
+        return finish(visualRow(state), correct, correct ? speak("Sharp eyes. That's what changed.") : speak("Not that bit. Watch it flip: the change is outlined.", "del"));
+      }
       case "claim": {
         const correct = (choice === "true") === round.truth;
         const row = voteRow(puzzle, round, puzzle.table.find((entry) => entry.values[round.input] === round.value))!;
@@ -337,8 +407,10 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
   }
 
   const score = results.filter(Boolean).length;
-  const flagged = puzzle.table
-    .map((row) => ({ row, votes: initialVotes[row.key] }))
+  // Logic puzzles flag table rows; numbers and looks flag the input values / situations people voted on.
+  const voteKeys = puzzle.table.length ? puzzle.table.map((row) => row.key) : Object.keys(initialVotes).filter((key) => caseLabel(puzzle, key));
+  const flagged = voteKeys
+    .map((key) => ({ row: puzzle.table.find((entry) => entry.key === key) ?? null, key, votes: initialVotes[key] }))
     .filter((entry) => entry.votes && entry.votes.right + entry.votes.off > 0)
     .sort((a, b) => b.votes!.off / (b.votes!.right + b.votes!.off) - a.votes!.off / (a.votes!.right + a.votes!.off))
     .slice(0, 3);
@@ -448,6 +520,32 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
               {round.kind === "pivot" && (
                 <PivotPick puzzle={puzzle} row={rowOf(puzzle, round.row)} answer={round.input} picked={picked === null ? null : Number(picked)} onPick={(index) => answer(String(index))} />
               )}
+              {(round.kind === "num-predict" || round.kind === "num-diff") && puzzle.numeric && (
+                <div className="step">
+                  <NumberCase model={puzzle.numeric} x={round.x} />
+                  {result ? (
+                    <NumberResults model={puzzle.numeric} x={round.x} />
+                  ) : (
+                    <Keypad
+                      key={phase.index}
+                      unit={puzzle.numeric.output.unit}
+                      decimals={puzzle.numeric.output.decimals}
+                      negative={round.kind === "num-diff" || puzzle.numeric.points.some((point) => point.new < 0 || point.old < 0)}
+                      answered={picked}
+                      onSubmit={answer}
+                    />
+                  )}
+                </div>
+              )}
+              {(round.kind === "num-split" || round.kind === "num-reach") && puzzle.numeric && (
+                <NumberLine key={phase.index} model={puzzle.numeric} target={round.kind === "num-reach" ? round.target : undefined} answer={round.answer} picked={picked} onPick={answer} />
+              )}
+              {round.kind === "vis-which" && puzzle.visual && stateOf(puzzle, round.state) && (
+                <VisualWhich model={puzzle.visual} state={stateOf(puzzle, round.state)!} greenFirst={round.greenFirst} picked={picked} onPick={answer} />
+              )}
+              {round.kind === "vis-spot" && puzzle.visual && stateOf(puzzle, round.state) && (
+                <VisualSpot key={phase.index} model={puzzle.visual} state={stateOf(puzzle, round.state)!} picked={picked} onPick={answer} />
+              )}
               {round.kind === "claim" && (
                 <>
                   <ClaimCard statement={claimText(puzzle, round)} truth={round.truth} answered={picked === null ? null : picked === "true"} onAnswer={(value) => answer(String(value))} />
@@ -480,11 +578,12 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
                 <div className="flags">
                   <p className="flags-title">Where players doubt Green</p>
                   <ul>
-                    {flagged.map(({ row, votes }) => (
-                      <li key={row.key}>
-                        <CaseChips puzzle={puzzle} row={row} />
+                    {flagged.map(({ row, key, votes }) => (
+                      <li key={key}>
+                        {row ? <CaseChips puzzle={puzzle} row={row} /> : <span>{caseLabel(puzzle, key)}</span>}
                         <small>
-                          → {outcome(puzzle, row.new)?.label} · {Math.round((votes!.off / (votes!.right + votes!.off)) * 100)}% say off
+                          {row ? `→ ${outcome(puzzle, row.new)?.label} · ` : ""}
+                          {Math.round((votes!.off / (votes!.right + votes!.off)) * 100)}% say off
                         </small>
                       </li>
                     ))}

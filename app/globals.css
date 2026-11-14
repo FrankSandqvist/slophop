@@ -78,6 +78,10 @@ a { color: inherit; }
 .fmv { position: absolute; inset: 0; display: block; padding: 0; border: 0; background: #000; cursor: pointer; }
 .fmv-canvas { margin: 0 auto; overflow: hidden; }
 .fmv-skip { position: absolute; top: 6px; right: 6px; padding: 0 6px; background: var(--ink); color: #fff; font-size: 16px; animation: blink 1.6s steps(2) infinite; }
+/* Generation progress on the top screen: stage, a chunky bar (5% steps) and the percentage. */
+.gen-progress { position: absolute; top: 6px; left: 6px; display: flex; align-items: center; gap: 6px; padding: 0 6px; background: var(--ink); color: #fff; font-size: 16px; white-space: nowrap; pointer-events: none; }
+.gen-bar { display: block; width: 72px; height: 10px; border: 2px solid #fff; }
+.gen-bar i { display: block; height: 100%; background: var(--yellow); }
 .press-start { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); padding: 0 8px; background: var(--ink); color: var(--yellow); font-size: 16px; white-space: nowrap; pointer-events: none; animation: blink 1.2s steps(2) infinite; }
 
 /* ---------- Pixel buttons ---------- */
@@ -143,6 +147,36 @@ a { color: inherit; }
 .case-base { margin-top: 8px; }
 .case-base::before { content: "THE CASE"; position: absolute; top: -10px; left: 8px; padding: 0 6px; background: var(--ink); color: #fff; font-size: 16px; line-height: 16px; }
 .step-rules { display: grid; gap: 4px; flex: none; }
+/* Numbers: the keypad (Brain Age style) and the number line. */
+.keypad { display: grid; gap: 4px; }
+.keypad-display { display: flex; align-items: baseline; justify-content: flex-end; gap: 6px; padding: 0 10px; border: 3px solid var(--ink); background: #fff; font-size: 32px; line-height: 40px; }
+.keypad-display small { font-size: 16px; color: #6a6576; }
+.keypad-keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.keypad-key { min-height: 32px; padding: 0; border: 3px solid var(--ink); background: #fff; box-shadow: 0 3px 0 var(--ink); color: var(--ink); font: inherit; font-size: 16px; cursor: pointer; }
+.keypad-key:active:not(:disabled) { transform: translateY(3px); box-shadow: none; }
+.keypad-key:disabled { cursor: default; color: #8a8596; }
+.keypad-ok { grid-column: 1 / -1; min-height: 34px; }
+.keypad-key:nth-child(13) ~ .keypad-ok { grid-column: span 3; }
+.dense .keypad-key { min-height: 26px; }
+.dense .keypad-ok { min-height: 30px; }
+.dense .keypad-display { line-height: 34px; }
+.numline { display: flex; justify-content: center; padding: 2px; border: 3px solid var(--ink); background: #fff; }
+.numline-canvas { cursor: ew-resize; touch-action: none; outline: none; }
+.numline-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.numline-value small { color: #6a6576; font-size: 16px; }
+
+/* Looks: mock screens drawn in the pixel style. Frames turn Green/Red only once revealed. */
+.mock { display: flex; justify-content: center; }
+.mock-tappable { cursor: crosshair; touch-action: manipulation; }
+.mock-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.mock-pick, .mock-frame { display: grid; gap: 2px; min-width: 0; padding: 4px; border: 3px solid var(--ink); background: #f1eddc; color: var(--ink); font: inherit; text-align: left; }
+.mock-pick { cursor: pointer; box-shadow: 0 3px 0 var(--ink); }
+.mock-pick:disabled { cursor: default; }
+.mock-picked { outline: 3px solid var(--yellow); outline-offset: 1px; }
+.mock-label { color: #6a6576; }
+.mock-green { border-color: var(--green-dark); background: #e1fbe4; }
+.mock-red { border-color: var(--red-dark); background: #ffe3e5; }
+
 /* First-time tutorial card. */
 .howto { display: grid; gap: 6px; padding: 6px 10px 8px; border: 3px solid var(--ink); background: #fff; }
 .howto-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }

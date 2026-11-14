@@ -43,7 +43,41 @@ export type Round =
   /** In this case only one condition decides what Green does: which? */
   | { kind: "pivot"; row: string; input: number }
   /** Red makes a claim about Green; true or false? `counter` is a row that disproves it. */
-  | { kind: "claim"; input: number; value: string; outcome: string; truth: boolean; counter: string | null };
+  | { kind: "claim"; input: number; value: string; outcome: string; truth: boolean; counter: string | null }
+  /* Numbers: worked out from the rules and keyed in, or found along the number line. */
+  /** At input x, what number does Green (or Red) give? Keyed in on the keypad. */
+  | { kind: "num-predict"; x: number; side: "new" | "old" }
+  /** At input x, how much more (or less) does Green give than Red? Keyed in. */
+  | { kind: "num-diff"; x: number }
+  /** Along the number line, drag to the first input where Green starts to differ from Red. `answer` is that x. */
+  | { kind: "num-split"; answer: number }
+  /** Drag to the smallest input where Green's result reaches `target`. */
+  | { kind: "num-reach"; target: number; answer: number }
+  /* Looks: the before/after mock screen in one situation. */
+  /** Tap the part of Green's picture that changed. */
+  | { kind: "vis-spot"; state: string }
+  /** Two pictures of the same situation: which one is Green's? `greenFirst` says which side it's on. */
+  | { kind: "vis-which"; state: string; greenFirst: boolean };
+
+/** What a puzzle is about: a decision (logic), a calculation (numeric) or how something looks (visual). */
+export type PuzzleFamily = "logic" | "numeric" | "visual";
+
+/** Numbers: Red's and Green's calculation over one real input, sampled by Gemini running Python. */
+export type NumericModel = {
+  input: { label: string; unit: string; explain: string; min: number; max: number; step: number };
+  output: { label: string; unit: string; explain: string; decimals: number };
+  /** Everything else held fixed, in plain words. */
+  context: string;
+  /** Sorted by x; `old` is Red's result, `new` Green's. */
+  points: Array<{ x: number; old: number; new: number }>;
+};
+
+/** One element of a mock screen, in frame pixels. Drawn by our own MockScreen in the pixel style. */
+export type MockShape = { id: string; kind: "box" | "text" | "line"; x: number; y: number; w: number; h: number; fill?: string; stroke?: string; text?: string; color?: string };
+/** One situation (a narrow phone, a very long name...): the same screen before (Red) and after (Green). `changed` = ids that differ. */
+export type VisualState = { id: string; label: string; story: string; before: MockShape[]; after: MockShape[]; changed: string[] };
+/** Looks: a small screen in a few situations. Gemini describes it as data; we draw it. */
+export type VisualModel = { frame: { w: number; h: number }; states: VisualState[] };
 
 export type Puzzle = {
   format: number;
@@ -64,9 +98,14 @@ export type Puzzle = {
   rules?: { old: string[]; new: string[] };
   component: { name: string; what: string; file: string };
   lines: { add: string; del: string };
+  /** Missing on older puzzles: logic. */
+  family?: PuzzleFamily;
+  /** Logic puzzles: conditions, outcomes and the full truth table. Empty for the other families. */
   inputs: PuzzleInput[];
   outcomes: PuzzleOutcome[];
   table: PuzzleRow[];
+  numeric?: NumericModel;
+  visual?: VisualModel;
   rounds: Round[];
   /** The real diff lines behind the component, cut from the PR on the server. */
   code: { file: string; lines: string[] } | null;
@@ -138,6 +177,8 @@ export function voteRow(puzzle: Puzzle, round: Round, fallback?: PuzzleRow) {
       return puzzle.table.find((row) => round.answers.includes(row.values[round.input])) ?? fallback;
     case "claim":
       return byKey(round.counter) ?? fallback;
+    default:
+      return fallback;
   }
 }
 
@@ -158,4 +199,46 @@ export function storyOf(puzzle: Puzzle, row: PuzzleRow) {
 
 export function valueLabel(puzzle: Puzzle, inputIndex: number, valueId: string) {
   return puzzle.inputs[inputIndex]?.values.find((value) => value.id === valueId)?.label ?? valueId;
+}
+
+/* ---------- Numbers and looks: a vote is about one input value or one situation ---------- */
+
+/** Rounds to the output's decimals (avoids 0.1 + 0.2 noise in answers). */
+export function roundTo(value: number, decimals: number) {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+/** "1 250 kr", "3.5 s": a number with its unit, at the given decimals. */
+export function formatNumber(value: number, unit: string, decimals = 0) {
+  const text = roundTo(value, decimals).toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  if (!unit) return text;
+  return /^[$€£¥]$/.test(unit) ? `${value < 0 ? "-" : ""}${unit}${text.replace("-", "")}` : `${text} ${unit}`;
+}
+
+export function pointAt(model: NumericModel, x: number) {
+  return model.points.find((point) => point.x === x);
+}
+
+/** A vote row for a number puzzle: one input value, with Red's and Green's results. */
+export function numericRow(model: NumericModel, x: number): PuzzleRow {
+  const point = pointAt(model, x);
+  return { key: `x~${x}`, values: [String(x)], old: String(point?.old ?? ""), new: String(point?.new ?? "") };
+}
+
+/** A vote row for a looks puzzle: one situation. */
+export function visualRow(state: VisualState): PuzzleRow {
+  return { key: `state~${state.id}`, values: [state.id], old: "before", new: "after" };
+}
+
+/** Human label for a vote key of any family (for "where players doubt Green"). */
+export function caseLabel(puzzle: Puzzle, key: string) {
+  if (key.startsWith("x~") && puzzle.numeric) {
+    const x = Number(key.slice(2));
+    const { input, output } = puzzle.numeric;
+    const point = pointAt(puzzle.numeric, x);
+    return `${input.label} ${formatNumber(x, input.unit)}${point ? ` → Green ${formatNumber(point.new, output.unit, output.decimals)}, Red ${formatNumber(point.old, output.unit, output.decimals)}` : ""}`;
+  }
+  if (key.startsWith("state~") && puzzle.visual) return puzzle.visual.states.find((state) => `state~${state.id}` === key)?.label ?? key;
+  return null;
 }

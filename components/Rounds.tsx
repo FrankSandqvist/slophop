@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { drawMascot, MASCOT_H, MASCOT_W, type MascotKind } from "@/lib/mascot";
 import { sfx } from "@/lib/sound";
-import { changedInput, outcome, type Puzzle, type PuzzleRow } from "@/lib/types";
+import { changedInput, formatNumber, outcome, type Puzzle, type PuzzleRow } from "@/lib/types";
 
 /*
  * Every puzzle step is ONE decision that fits the bottom screen. Info screens (rules, intro, end) may scroll.
@@ -451,6 +451,35 @@ export function RulesSheet({ puzzle, onClose }: { puzzle: Puzzle; onClose?: () =
       {puzzle.where && <p><span className="tag">WHERE</span> {puzzle.where}</p>}
       {puzzle.scenario && <p><span className="tag">SCENE</span> {puzzle.scenario}</p>}
       <dl className="glossary">
+        {puzzle.numeric && (
+          <>
+            <div>
+              <dt>{puzzle.numeric.input.label}</dt>
+              <dd>
+                {puzzle.numeric.input.explain}{" "}
+                <small>
+                  ({formatNumber(puzzle.numeric.input.min, puzzle.numeric.input.unit)} to {formatNumber(puzzle.numeric.input.max, puzzle.numeric.input.unit)})
+                </small>
+              </dd>
+            </div>
+            <div>
+              <dt>{puzzle.numeric.output.label}</dt>
+              <dd>{puzzle.numeric.output.explain}</dd>
+            </div>
+            {puzzle.numeric.context && (
+              <div>
+                <dt>Fixed</dt>
+                <dd>{puzzle.numeric.context}</dd>
+              </div>
+            )}
+          </>
+        )}
+        {puzzle.visual?.states.map((state) => (
+          <div key={state.id}>
+            <dt>{state.label}</dt>
+            <dd>{state.story}</dd>
+          </div>
+        ))}
         {puzzle.inputs.map((input) => (
           <div key={input.id}>
             <dt>{input.label}</dt>

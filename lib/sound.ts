@@ -57,6 +57,14 @@ export const sfx = {
     tone("square", 1568, 1568, 0.16, 0.05, 0.16);
   },
   wrong: () => tone("sawtooth", 200, 120, 0.25, 0.05),
+  /** A chiptune snare roll that speeds up for ~2s (the winner reveal). */
+  drumroll: () => {
+    let at = 0;
+    for (let i = 0; i < 26; i++) {
+      tone("square", 150 + i * 3, 120, 0.035, 0.03 + i * 0.0012, at);
+      at += Math.max(0.045, 0.12 - i * 0.004);
+    }
+  },
   found: () => {
     for (const [index, note] of [523, 659, 784, 1047, 1319].entries()) tone("triangle", note, note, 0.12, 0.06, index * 0.06);
   },
