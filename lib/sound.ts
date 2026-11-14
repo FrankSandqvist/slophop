@@ -5,19 +5,61 @@ let context: AudioContext | null = null;
 let master: GainNode | null = null;
 let muted = false;
 
-function audio() {
-  if (typeof window === "undefined") return null;
-  // Browsers refuse audio before the first tap/click; stay silent until then instead of warning.
-  if (!context && navigator.userActivation && !navigator.userActivation.hasBeenActive) return null;
+function createContext() {
   if (!context) {
     const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!Ctor) return null;
     context = new Ctor();
     master = context.createGain();
     master.connect(context.destination);
+    master.gain.value = muted ? 0 : 1;
   }
-  if (context.state === "suspended") void context.resume();
   return context;
+}
+
+function audio() {
+  if (typeof window === "undefined") return null;
+  // Browsers refuse audio before the first tap/click; stay silent until then instead of warning.
+  if (!context && navigator.userActivation && !navigator.userActivation.hasBeenActive) return null;
+  const ctx = createContext();
+  if (ctx && ctx.state === "suspended") void ctx.resume();
+  return ctx;
+}
+
+/**
+ * Unlocks audio, for iOS in particular: must run synchronously inside a FINISHED tap (pointerup/touchend/click, not
+ * pointerdown). Starts/resumes the shared AudioContext and plays one silent sample, and declares the page a media player
+ * (iOS 17+ `navigator.audioSession`) so the ring/silent switch doesn't mute the soundtrack. Returns false if impossible.
+ */
+export function unlockAudio() {
+  if (typeof window === "undefined") return false;
+  try {
+    const session = (navigator as unknown as { audioSession?: { type: string } }).audioSession;
+    if (session && session.type !== "playback") session.type = "playback";
+  } catch {}
+  const ctx = createContext();
+  if (!ctx) return false;
+  if (ctx.state !== "running") void ctx.resume();
+  try {
+    const silence = ctx.createBufferSource();
+    silence.buffer = ctx.createBuffer(1, 1, 22050);
+    silence.connect(ctx.destination);
+    silence.start(0);
+  } catch {}
+  return true;
+}
+
+// Unlock on every finished tap, click or key press until audio is actually running, on any page of the app.
+if (typeof window !== "undefined") {
+  const events = ["pointerup", "touchend", "click", "keydown"] as const;
+  const unlock = () => {
+    if (context?.state === "running") {
+      for (const name of events) window.removeEventListener(name, unlock, true);
+      return;
+    }
+    unlockAudio();
+  };
+  for (const name of events) window.addEventListener(name, unlock, { capture: true, passive: true });
 }
 
 export function setMuted(value: boolean) {

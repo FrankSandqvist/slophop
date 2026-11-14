@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { MascotKind } from "@/lib/mascot";
-import { playLoop, sfx } from "@/lib/sound";
+import { playLoop, sfx, unlockAudio } from "@/lib/sound";
 import type { PropSpec, Puzzle, StageCard } from "@/lib/types";
 import { DSShell, TextBox, type Line } from "./DS";
 import { Logo } from "./Logo";
@@ -254,27 +254,30 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
     let stop: (() => void) | null = null;
     let cancelled = false;
     let started = false;
+    let pending = false;
+    // Finished taps only: iOS won't start audio from a touch-down (pointerdown).
+    const events = ["pointerup", "touchend", "click", "keydown"] as const;
     const unlisten = () => {
-      window.removeEventListener("pointerdown", begin, true);
-      window.removeEventListener("keydown", begin, true);
+      for (const name of events) window.removeEventListener(name, begin, true);
     };
     async function begin() {
-      if (started) return;
-      started = true;
-      unlisten();
+      if (started || pending) return;
+      unlockAudio(); // synchronously, inside the tap
+      pending = true;
       const pick = tracks[Math.floor(Math.random() * tracks.length)];
       const stopTrack = await playLoop(`/api/puzzles/${pick.id}/music`, pick.bpm).catch(() => null);
+      pending = false;
       if (cancelled) return stopTrack?.();
+      // Didn't start (audio still locked, or the track failed): keep listening, the next tap tries again.
       if (!stopTrack) return;
+      started = true;
+      unlisten();
       stop = stopTrack;
       setMusicOn(true);
       if (stage.current.show) stage.current.show = { ...stage.current.show, beat: true };
     }
+    for (const name of events) window.addEventListener(name, begin, true);
     if (navigator.userActivation?.hasBeenActive) void begin();
-    else {
-      window.addEventListener("pointerdown", begin, true);
-      window.addEventListener("keydown", begin, true);
-    }
     return () => {
       cancelled = true;
       unlisten();
