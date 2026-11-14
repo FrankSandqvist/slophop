@@ -7,13 +7,14 @@ import type { MascotKind } from "@/lib/mascot";
 import { playLoop, sfx } from "@/lib/sound";
 import type { PropSpec, Puzzle, StageCard } from "@/lib/types";
 import { DSShell, TextBox, type Line } from "./DS";
+import { Logo } from "./Logo";
 import { HowToPlay, TUTORIAL, TUTORIAL_KEY, type TutorialLine } from "./HowToPlay";
 import { PS1Stage, type StageState } from "./PS1Stage";
 
 type Summary = Pick<Puzzle, "id" | "title" | "pr" | "component" | "musicFile" | "bpm">;
 type Progress = {
   type: "stage";
-  stage: "fetch" | "rank" | "pick" | "model" | "music" | "fmv" | "save";
+  stage: "fetch" | "rank" | "pick" | "model" | "music" | "fmv" | "world" | "save";
   status: "active" | "done" | "skipped";
   detail?: string;
   cards?: StageCard[];
@@ -109,6 +110,7 @@ function progressLine(event: Progress): Line | null {
   if (event.stage === "model" && event.status === "active") return { who: "del", text: "Now running the old me and the new Green side by side. Every case." };
   if (event.stage === "model" && event.status === "done") return { who: "add", text: `Done: ${event.detail}.` };
   if (event.stage === "fmv" && event.status === "active") return { who: "add", text: "Meanwhile, we're shooting a little movie about it. Lights, camera..." };
+  if (event.stage === "world" && event.status === "done" && event.detail) return { who: "del", text: `Fun fact, while we wait: ${event.detail}` };
   if (event.stage === "save" && event.status === "done") return { who: "add", text: "Ready. Let's go!" };
   return null;
 }
@@ -430,8 +432,7 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
         <div className="menu">
           <header className="menu-head">
             <h1 className="logo">
-              <span className="logo-slop">SLOP</span>
-              <span className="logo-hop">HOP</span>
+              <Logo />
             </h1>
             <p>Real code changes. Tiny brain teasers.</p>
           </header>

@@ -16,6 +16,7 @@ import {
   type VisualDesign,
 } from "./families";
 import { explainRounds } from "./explain";
+import { researchWorld } from "./world";
 import { settleLimited } from "./limit";
 import { mascotReferences } from "./sprites";
 import { listFiles, readText, saveFile } from "./storage";
@@ -33,7 +34,7 @@ const CANDIDATES = 50;
 export type ProgressEvent =
   | {
       type: "stage";
-      stage: "fetch" | "rank" | "pick" | "model" | "music" | "fmv" | "save";
+      stage: "fetch" | "rank" | "pick" | "model" | "music" | "fmv" | "world" | "save";
       status: "active" | "done" | "skipped";
       detail?: string;
       /** rank/done: the top-ranked candidate PRs, best first. */
@@ -84,6 +85,11 @@ const RANK_QUESTIONS: Record<string, DecisionQuestion> = {
   },
   plain: { type: "noul", instructions: "Could the changed behaviour be explained in everyday language, with no programming jargon, in two sentences?" },
   noise: { type: "noul", instructions: "Is this change mostly noise: only tests, formatting, generated files, version bumps or comments?" },
+  // Crypto projects are star-rich and AI-heavy, so they crowd the picks; a small hit keeps the mix varied.
+  crypto: {
+    type: "noul",
+    instructions: "Is this project about cryptocurrency or blockchain: coins, tokens, crypto wallets, exchanges, NFTs, DeFi, chains or crypto trading?",
+  },
 };
 
 type Fit = Record<PuzzleFamily, number>;
@@ -103,9 +109,15 @@ async function rankScore(pr: PullRequestSource, signal?: AbortSignal) {
   const kind = answers.kind;
   const probabilities = kind?.type === "choice" ? kind.probabilities : {};
   const fit: Fit = { logic: probabilities.logic ?? 0, numeric: probabilities.numeric ?? 0, visual: probabilities.visual ?? 0 };
-  const score = Math.max(0, 0.35 * level("worth") + 0.25 * level("small") + 0.25 * level("relatable") + 0.15 * yes("plain") - 0.4 * yes("noise"));
+  const base = Math.max(0, 0.35 * level("worth") + 0.25 * level("small") + 0.25 * level("relatable") + 0.15 * yes("plain") - 0.4 * yes("noise"));
+  // Small hit for crypto (at most -15%): it can still win when it's clearly the best puzzle.
+  const score = base * (1 - 0.15 * yes("crypto"));
   return { score, fit };
 }
+
+/** 0..1 for how widely known a repo is: log scale, 10k+ stars = 1. */
+const prevalence = (stars: number | null | undefined) => Math.min(1, Math.log10((stars ?? 0) + 1) / 4);
+const KNOWN_STARS = Number(process.env.MIN_STARS || 50);
 
 /** How often each kind of puzzle is aimed for, so the puzzle list gets variety. */
 const FAMILY_WEIGHTS: Fit = { logic: 0.4, numeric: 0.3, visual: 0.3 };
@@ -114,24 +126,24 @@ const FAMILY_WEIGHTS: Fit = { logic: 0.4, numeric: 0.3, visual: 0.3 };
  * Aims for a random kind of puzzle and takes the best PR that fits it (a clear fit, and not much worse than the best PR).
  * Falls back to the best PR overall, as whatever kind it fits best.
  */
-function chooseCandidate(ranked: Array<{ score: number | null; fit: Fit | null }>): { index: number; family: PuzzleFamily } {
+function chooseCandidate(ranked: Array<{ score: number | null; fit: Fit | null; pr: { stars: number | null } }>): { index: number; family: PuzzleFamily } {
   const best = ranked[0]?.score;
   if (best === null || best === undefined) return { index: 0, family: "logic" };
   let roll = Math.random();
   // PUZZLE_FAMILY=numeric|visual|logic forces the aim (testing); otherwise it's drawn by FAMILY_WEIGHTS.
   const forced = process.env.PUZZLE_FAMILY as PuzzleFamily | undefined;
   const target = forced && forced in FAMILY_WEIGHTS ? forced : ((Object.keys(FAMILY_WEIGHTS) as PuzzleFamily[]).find((family) => (roll -= FAMILY_WEIGHTS[family]) < 0) ?? "logic");
-  let index = -1;
-  let value = 0;
-  ranked.forEach((entry, i) => {
+  // The best fit for the kind; a well-known repo (players may know it) wins only if it's nearly as good (within 15%).
+  const value = (entry: (typeof ranked)[number]) => {
     const fit = entry.fit?.[target] ?? 0;
-    if (entry.score === null || fit < 0.45 || entry.score < best * 0.6) return;
-    if (entry.score * fit > value) {
-      value = entry.score * fit;
-      index = i;
-    }
-  });
-  if (index >= 0) return { index, family: target };
+    return entry.score === null || fit < 0.45 || entry.score < best * 0.6 ? 0 : entry.score * fit;
+  };
+  const top = Math.max(0, ...ranked.map(value));
+  if (top > 0) {
+    const known = ranked.findIndex((entry) => (entry.pr.stars ?? 0) >= KNOWN_STARS && value(entry) >= top * 0.85);
+    const index = known >= 0 ? known : ranked.findIndex((entry) => value(entry) === top);
+    return { index, family: target };
+  }
   const fit = ranked[0].fit;
   const family = fit ? (Object.keys(fit) as PuzzleFamily[]).sort((a, b) => fit[b] - fit[a])[0] : "logic";
   return { index: 0, family: fit && fit[family] > 0.3 ? family : "logic" };
@@ -144,9 +156,10 @@ async function rankCandidates(candidates: PullRequestSource[], signal?: AbortSig
   const scores = await settleLimited(candidates, 10, (pr) => rankScore(pr, signal));
   const ranked = candidates.map((pr, index) => {
     const result = scores[index];
+    // Popularity only nudges the score (a 10k-star repo gets +10%): interesting first, well-known second.
     return {
       pr,
-      score: result.status === "fulfilled" ? result.value.score : (null as number | null),
+      score: result.status === "fulfilled" ? result.value.score * (0.9 + 0.1 * prevalence(pr.stars)) : (null as number | null),
       fit: result.status === "fulfilled" ? result.value.fit : (null as Fit | null),
       order: index,
     };
@@ -658,7 +671,18 @@ function makeEdge(table: PuzzleRow[], inputs: PuzzleInput[]): Extract<Round, { k
  * Rounds, built by our code from the table (never by the model). Each is ONE decision that fits the screen and can be
  * reasoned out from the rulebooks: open on an applied rule, find where the change bites, a shuffled mix, try to break it.
  */
+/**
+ * How many steps a logic puzzle deserves: about one per two cases (2-5), and at most 3 when only one case changed.
+ * A simple change gets a short puzzle instead of repeating itself.
+ */
+export function logicBudget(table: PuzzleRow[]) {
+  const changed = table.filter((row) => row.old !== row.new).length;
+  const budget = Math.max(2, Math.min(5, Math.ceil(table.length / 2)));
+  return changed <= 1 ? Math.min(budget, 3) : budget;
+}
+
 export function buildRounds(table: PuzzleRow[], outcomes: PuzzleOutcome[], inputs: PuzzleInput[]): Round[] {
+  const limit = logicBudget(table);
   const changed = shuffle(table.filter((row) => row.old !== row.new));
   const same = shuffle(table.filter((row) => row.old === row.new));
   const opener: Round[] = [];
@@ -684,7 +708,9 @@ export function buildRounds(table: PuzzleRow[], outcomes: PuzzleOutcome[], input
   const breaker = bad ? makeTweak(table, "outcome", bad.id) : null;
   if (breaker) closer.push(breaker);
 
-  return [...opener, ...shuffle(middle).slice(0, Math.max(0, 5 - opener.length - closer.length)), ...closer].slice(0, 5);
+  // Opener and closer first; the shuffled middle fills what the budget allows. Short puzzles keep the opener.
+  const middleRoom = Math.max(0, limit - opener.length - closer.length);
+  return [...opener, ...shuffle(middle).slice(0, middleRoom), ...closer].slice(0, limit);
 }
 
 /** Validates the model's design against itself; throws when it's unusable. */
@@ -849,6 +875,13 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
       return null;
     });
 
+  // How this reaches the world: Google Search research + company enrichment, alongside everything else. Never waited for
+  // beyond a short grace at save time, so it can't slow generation down.
+  const worldTask = researchWorld(ranked[0].pr, signal).then((world) => {
+    if (world) emit({ type: "stage", stage: "world", status: "done", detail: world.headline || world.reach });
+    return world;
+  });
+
   // The cutscene: as soon as its script is written, Gemini Omni films it (360p) with the real mascots as references.
   const fmvTask = flairTask
     .then(async (flair): Promise<Puzzle["fmv"]> => {
@@ -924,12 +957,13 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
     },
   );
   const [musicFile, flair, fmv, explainers] = await Promise.all([musicTask, flairTask, fmvTask, explainTask]);
+  const world = await Promise.race([worldTask, new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000))]);
   emit({ type: "stage", stage: "save", status: "active" });
   const puzzle: Puzzle = {
     format: FORMAT,
     id,
     createdAt: new Date().toISOString(),
-    pr: { url: pr.url, repository: pr.repository, number: pr.number, title: pr.title, author: pr.author, mergedAt: pr.mergedAt, madeWith: pr.madeWith },
+    pr: { url: pr.url, repository: pr.repository, number: pr.number, title: pr.title, author: pr.author, mergedAt: pr.mergedAt, madeWith: pr.madeWith, stars: pr.stars },
     candidates: candidates.map((candidate) => ({ repository: candidate.repository, number: candidate.number, title: candidate.title, url: candidate.url })),
     pickReason: String(choice.reason ?? ""),
     title: String(data.title ?? pr.title),
@@ -943,6 +977,7 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
     ...family,
     rounds,
     ...(explainers ? { explainers } : {}),
+    world,
     code: resolveCode(data.codeAnchor, pr.diff),
     props: flair.props,
     musicStyle: flair.music,

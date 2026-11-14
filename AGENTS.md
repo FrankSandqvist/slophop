@@ -22,16 +22,18 @@ scaled up with nearest-neighbour. Look and feel: PS1 / Nintendo DS shading, Para
 
 Everything that can run in parallel does:
 
-1. `findCandidatePullRequests(50)` (`lib/github.ts`): four GitHub searches (100 results each, two at a time: the search API
-   has a burst limit) for recent merged PRs **made with AI
+1. `findCandidatePullRequests(50)` (`lib/github.ts`): four GitHub GraphQL searches (100 results each, two at a time: search
+   has a burst limit; REST fallback) for recent merged, **review-approved** PRs **made with AI
    coding tools**, found by each tool's own signature (Claude Code footer, Copilot / Devin / Jules agent authors, Codex task
    links, Cursor footer); every result is re-checked with `madeWithTool` before loading and dropped without a real signature
-   (search matches loosely). Dependency bots and chore PRs filtered out; ~70 loaded with diffs, 12 at a time (`settleLimited`,
+   (search matches loosely). GraphQL returns each repo's stars, so repos with `MIN_STARS` (50) or more go first and
+   smaller ones only fill gaps (review:approved lifts the 50+ star share from ~5% to ~30%). Dependency bots and chore PRs filtered out; ~70 loaded with diffs, 12 at a time (`settleLimited`,
    `lib/limit.ts`; ~140 GitHub calls of the 5,000/hour budget), top 50 by a branching-logic heuristic (no surrounding code yet). A pasted PR URL skips this. (~8s)
 2. **Rank with the Gemini Decisions API** (`gemini-decision-1`, `POST /v1beta/decisions`, `decide()` in `lib/gemini.ts`): one call
    per candidate, 10 at a time, asking calibrated rubric/yes-no questions (logic, small & self-contained, relatable, plain,
-   noise) plus which kind of puzzle it makes (`kind`: logic / numeric / visual / none). Combined into a 0–1 score.
-   `chooseCandidate` aims for a random kind (`FAMILY_WEIGHTS` 40/30/30; `PUZZLE_FAMILY` env forces one for tests) and takes
+   noise, crypto: a small hit of up to -15% so star-rich crypto repos don't crowd the picks) plus which kind of puzzle it makes (`kind`: logic / numeric / visual / none). Combined into a 0–1 score.
+   Popularity only nudges the score (log stars, at most +10%), and `chooseCandidate` takes a well-known repo only when it's
+   within 15% of the best fit. It aims for a random kind (`FAMILY_WEIGHTS` 40/30/30; `PUZZLE_FAMILY` env forces one for tests) and takes
    the best PR that clearly fits it, else the best PR overall as its own kind. Falls back to the heuristic order if the API fails. (a few seconds for 50)
 3. **In parallel from here:** `designFlair` (`gemini-4-hydrogen`, low thinking) writes the project's music line (lead
    instrument and sounds, ≤40 words), picks a tempo that fits the project (76–132 BPM, saved as `bpm`) and two **props** built from PS1 primitives (`PropSpec`: box/cylinder/sphere/cone/torus parts,
@@ -83,6 +85,9 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
   - `pivot` — in this case only one condition decides Green's outcome: which?
   - `claim` — Red claims "when X is Y, Green always does Z"; true or false.
   Order: apply a rule → where the change bites (tweak) → shuffled mix → try to break it (tweak to a bad outcome).
+  Step count fits the change (simple changes get short puzzles): logic `logicBudget` ≈ one per two cases (2-5, max 3 when
+  only one case changed); numbers `numericBudget` = 2 + agree/disagree flips + 1 for a limit (max 5); looks = one per
+  situation with a distinct change.
   Each step shows the rules it is about as the owner's speech bubble (`RuleBubble`: Green's, Red's for "what did Red do", both
   for `who`) above a case box tagged THE CASE. If a step would overflow, PlayDS adds `.dense` (tighter padding), then `.no-rules`
   (the bubble becomes a one-line "tap to read" strip), then `.denser` (drops the strip and `.can-hide`, e.g. one spare pattern row).
@@ -92,6 +97,11 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
   Green starts to differ, where it first hits a target; Green's line appears after answering).
 - Visual steps: `vis-which` (two mock screens: which is Green's?) and `vis-spot` (tap what changed in Green's picture; then it
   flips between before and after with the change outlined). One step per situation (seeing both gives the next answer away).
+- World (`lib/world.ts`, `components/World.tsx`): "how does this affect the world". From the pick on, Hydrogen with the
+  built-in `google_search` tool finds who makes and uses the project (with numbers), what this change means for them, up to
+  3 companies (with domains) and sources; context.dev (`CONTEXT_DEV_KEY`, `POST /v1/brand/retrieve` by domain) adds logos and
+  descriptions. Runs in parallel and is waited for at most 3s at save time; any failure just leaves `world` empty. Shown as
+  the IN THE WORLD card on the intro, two narrator lines, and WHY IT MATTERS on the summary.
 - After each step's reveal (and after the last, before the summary): a "Why?" screen for that exact case. Red and Green each
   explain their result in first person, plus a takeaway (`puzzle.explainers`, one per round, written by one Hydrogen call in
   `lib/explain.ts` from a precise description of each step's case; generated in parallel with the music/cutscene).
@@ -105,6 +115,9 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
   the mascots' black legs, so they still read in front of it), PR cards, +/− rain, confetti; mascots as
   paper-thin billboards. Driven by a mutable `StageState` ref (moods, bpm, `show`).
 - `lib/pixelfont.ts` — hand-drawn 3×5 pixel font (`drawText`) for crisp text on tiny canvases.
+- `lib/logo.ts` — the wordmark "SL(Green)P H(Red)P": pixel-font letters with the mascots' faces (`drawHead`) as the O's.
+  Used in the menu header (`components/Logo.tsx`). The stage's TV keeps plain SLOP HOP letters: the mascots stand in front
+  of it, so faces in the logo there would double them up.
 - `components/DS.tsx` — `DSShell` (two screens + hinge), `TextBox` (typewriter dialogue, name tags GREEN/RED/SLOPHOP), `Mascot`.
 - `components/Rounds.tsx` — `InputTiles`, `Outcomes`, `OutcomeCards`, `WhoPick`, `Vote`, `CodeCard`.
 - Screens: top 4:3, bottom 25:23, fixed; on desktop the handheld is sized from the window height so the page never scrolls; on
@@ -113,6 +126,12 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
   16/32/48px so every dot is a whole pixel (no letter-spacing, no synthetic bold). Colour rule: green and red ONLY mean Green
   (new code / added lines) and Red (old code / removed lines); feedback and actions use yellow, ink and greys.
   On phones the shell disappears and the two screens fill the viewport.
+- Motion (`app/globals.css`, "Motion" block): short stepped animations (steps rise in part by part, answer cards deal in,
+  right pops, wrong shakes, Red/Green results slide in from their sides, the "Why?" lines appear in order, sheets slide up,
+  the menu deals in). Off under prefers-reduced-motion. Step fit is measured from layout offsets (`contentBottom`), never
+  scrollHeight, so animations can't trigger fallbacks. The top screen shows step pips (yellow right, grey wrong, white now).
+- Company logos go through `/api/logo` (same-origin copy, media.brand.dev only) so they can be drawn pixel-style into a
+  16px canvas; their brightness picks a white or ink tile.
 - `lib/sound.ts` — shared AudioContext: gapless music loop, chiptune UI blips, mute. `musicBeat()` is a beat clock at the puzzle's
   `bpm` (96 for older puzzles) from the track's start, restarting each loop; the stage and every mascot dance to it. `loopable` makes
   the clip loop cleanly: trims MP3 padding and any fade-out, cuts to whole bars at `bpm`, and crossfades the seam. Lyria clip has
@@ -129,7 +148,7 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
 
 ## Rules
 
-- Keep `GEMINI_KEY`, `GITHUB_TOKEN`, `BLOB_READ_WRITE_TOKEN` server-side.
+- Keep `GEMINI_KEY`, `GITHUB_TOKEN`, `BLOB_READ_WRITE_TOKEN`, `CONTEXT_DEV_KEY` server-side.
 - Gemini only fills data (`lib/types.ts`). New visuals or mechanics are added as our own components, not generated code.
 - Keep every puzzle about ONE small decision so votes map to concrete cases.
 - Keep a link to the real PR on every puzzle. Only say a PR was made with an AI tool when its own signature says so

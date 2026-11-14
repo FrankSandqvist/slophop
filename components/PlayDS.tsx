@@ -6,12 +6,14 @@ import type { MascotKind, MascotMood } from "@/lib/mascot";
 import { playLoop, setMuted, sfx } from "@/lib/sound";
 import { caseLabel, formatNumber, numericRow, outcome, pointAt, roundTo, storyOf, valueLabel, visualRow, voteRow, type Puzzle, type PuzzleRow, type Round, type VoteTally } from "@/lib/types";
 import { Fmv } from "./Fmv";
+import { starCount, WorldCard } from "./World";
 import { Keypad, NumberCase, NumberLine, NumberResults, VisualSpot, VisualWhich } from "./Families";
 import { DSShell, TextBox, type Line } from "./DS";
 import { PS1Stage, type StageState } from "./PS1Stage";
 import {
   CaseChips,
   ClaimCard,
+  FaceIcon,
   CodeCard,
   EdgePick,
   OddOneOut,
@@ -81,6 +83,20 @@ function CaseRecap({ puzzle, round, row }: { puzzle: Puzzle; round: Round; row: 
     </>
   );
 }
+
+/**
+ * How tall a step's content really is: the laid-out bottom of its parts (offsets ignore CSS transforms, so the rise-in
+ * animation can't make a step look taller than it is). The panel is the parts' offsetParent (position: relative).
+ */
+function contentBottom(panel: HTMLElement) {
+  let bottom = 0;
+  for (const child of Array.from(panel.children) as HTMLElement[]) {
+    if (child.offsetParent !== panel) continue;
+    bottom = Math.max(bottom, child.offsetTop + child.offsetHeight);
+  }
+  return bottom + parseFloat(getComputedStyle(panel).paddingBottom || "0");
+}
+const overflows = (panel: HTMLElement) => contentBottom(panel) > panel.clientHeight + 1;
 
 /** Whose rules a step is about: Red's for "what did Red do", both when you must tell them apart, else Green's. */
 function rulesFor(round: Round): Array<"old" | "new"> {
@@ -192,9 +208,11 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
   const [phase, setPhase] = useState<Phase>({ kind: "intro" });
   const [script, setScript] = useState<Line[]>(() => [
     { who: "narrator", text: `${puzzle.pr.repository}. ${puzzle.project}` },
+    ...(puzzle.world?.reach ? [{ who: "narrator" as const, text: `In the world: ${puzzle.world.reach}` }] : []),
     ...(puzzle.where ? [{ who: "narrator" as const, text: `Where we are: ${puzzle.where}` }] : []),
     ...(puzzle.scenario ? [{ who: "narrator" as const, text: puzzle.scenario }] : []),
     { who: "narrator", text: `This pull request: ${puzzle.change}` },
+    ...(puzzle.world?.impact ? [{ who: "narrator" as const, text: `What it means: ${puzzle.world.impact}` }] : []),
     // Each reads out their rulebook: the puzzles are worked out from these.
     ...(puzzle.rules?.old ?? []).map((rule, index) => ({ who: "del" as const, text: `${index === 0 ? "My old rules. " : ""}${rule}` })),
     ...(puzzle.rules?.new ?? []).map((rule, index) => ({ who: "add" as const, text: `${index === 0 ? "My new rules! " : ""}${rule}` })),
@@ -204,6 +222,8 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
   // The cutscene plays first (if this puzzle has one); its lines follow the video, then the intro script takes over.
   const [fmvPlaying, setFmvPlaying] = useState(Boolean(puzzle.fmv));
   const [fmvLine, setFmvLine] = useState(-1);
+  // While the cutscene plays, the bottom screen fades back so the movie has the attention; a tap there brings it back.
+  const [bottomPeek, setBottomPeek] = useState(false);
   const fmvLines = useMemo<Line[]>(() => (puzzle.fmv?.lines ?? []).map((entry) => ({ who: entry.who, text: entry.text })), [puzzle]);
   const [picked, setPicked] = useState<string | null>(null);
   const [result, setResult] = useState<Result | null>(null);
@@ -234,7 +254,7 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
       const levels = ["dense", "no-rules", "denser"];
       panel.classList.remove(...levels);
       for (const level of levels) {
-        if (panel.scrollHeight <= panel.clientHeight + 1) break;
+        if (!overflows(panel)) break;
         panel.classList.add(level);
       }
     };
@@ -271,7 +291,7 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
     }
     const timer = window.setTimeout(() => {
       const panel = document.querySelector<HTMLElement>(".panel-step");
-      if (panel) console.log(`QA step ${phase.kind === "round" ? phase.index + 1 : "-"}: scroll ${panel.scrollHeight} / client ${panel.clientHeight} -> ${panel.scrollHeight > panel.clientHeight + 1 ? "OVERFLOW" : "fits"} [${[...panel.classList].filter((name) => !name.startsWith("panel")).join(" ") || "roomy"}]`);
+      if (panel) console.log(`QA step ${phase.kind === "round" ? phase.index + 1 : "-"}: content ${Math.round(contentBottom(panel))} / client ${panel.clientHeight} -> ${overflows(panel) ? "OVERFLOW" : "fits"} [${[...panel.classList].filter((name) => !name.startsWith("panel")).join(" ") || "roomy"}]`);
       console.log(`QA page: ${document.documentElement.scrollHeight} / ${window.innerHeight} -> ${document.documentElement.scrollHeight > window.innerHeight + 1 ? "PAGE SCROLLS" : "page fits"}`);
     }, 1500);
     return () => window.clearTimeout(timer);
@@ -483,7 +503,14 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
               }}
             />
           )}
-          {round && phase.kind === "round" && <div className="hud">{`${phase.index + 1} / ${puzzle.rounds.length}`}</div>}
+          {round && phase.kind === "round" && (
+            // Step pips: done ones yellow (right) or grey (wrong), the current one white and pulsing.
+            <div className="hud hud-pips" role="img" aria-label={`Step ${phase.index + 1} of ${puzzle.rounds.length}`}>
+              {puzzle.rounds.map((_, index) => (
+                <i key={index} className={index < results.length ? (results[index] ? "pip-right" : "pip-wrong") : index === phase.index ? "pip-now" : ""} />
+              ))}
+            </div>
+          )}
           <TextBox
             line={line}
             onTyping={onTyping}
@@ -492,7 +519,12 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
         </>
       }
       bottom={
-        <div className="play">
+        <div className={`play ${fmvPlaying && puzzle.fmv && !bottomPeek ? "play-dimmed" : ""}`}>
+          {fmvPlaying && puzzle.fmv && !bottomPeek && (
+            <button className="dim-cover" onClick={() => setBottomPeek(true)} aria-label="Show the bottom screen">
+              <span>▲ Watching the movie · tap to show</span>
+            </button>
+          )}
           <div className="play-bar">
             <Link href="/" className="px-btn px-btn-icon" aria-label="Back to the menu">◀</Link>
             {/* During a step the bar shows its one-line goal (saves a row on the fixed screen). */}
@@ -517,19 +549,23 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
           {phase.kind === "intro" && (
             <div className="panel panel-info">
               <a className="pr-card" href={puzzle.pr.url} target="_blank" rel="noreferrer">
-                <span className="pr-repo">{puzzle.pr.repository} #{puzzle.pr.number}</span>
+                <span className="pr-repo">
+                  {puzzle.pr.repository} #{puzzle.pr.number}
+                  {puzzle.pr.stars ? ` · ★ ${starCount(puzzle.pr.stars)}` : ""}
+                </span>
                 <strong>{puzzle.pr.title}</strong>
                 <small>
                   {puzzle.pr.madeWith ? `A real, public pull request, signed as made with ${puzzle.pr.madeWith}.` : "A real, public pull request."} See it on GitHub ↗
                 </small>
               </a>
+              {puzzle.world && <WorldCard world={puzzle.world} title="IN THE WORLD" />}
               <RulesSheet puzzle={puzzle} />
               <button className="px-btn px-btn-go panel-sticky" onClick={start}>Start ▶</button>
             </div>
           )}
 
           {round && phase.kind === "round" && (
-            <div className="panel panel-step" ref={stepPanel}>
+            <div className="panel panel-step" ref={stepPanel} key={`step-${phase.index}`}>
               {/* The rules this step is about, said by whoever owns them. Hidden first if the step doesn't fit (Rules button still has them). */}
               {puzzle.rules && (
                 <>
@@ -540,7 +576,15 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
                   </div>
                   {/* On short screens the bubble gives way to this one-line way in. */}
                   <button className="rules-peek" onClick={() => setRulesOpen(true)}>
-                    ▸ {rulesFor(round).length > 1 ? "Red's and Green's rules" : rulesFor(round)[0] === "new" ? "Green's rules" : "Red's rules"}: tap to read
+                    <span className="peek-faces" aria-hidden>
+                      {rulesFor(round).map((side) => (
+                        <FaceIcon key={side} kind={side === "new" ? "add" : "del"} />
+                      ))}
+                    </span>
+                    <span className="peek-label">
+                      {rulesFor(round).length > 1 ? "Red's and Green's rules" : rulesFor(round)[0] === "new" ? "Green's rules" : "Red's rules"}
+                    </span>
+                    <span className="peek-go">Read ▸</span>
                   </button>
                 </>
               )}
@@ -624,7 +668,7 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
           )}
 
           {phase.kind === "explain" && puzzle.explainers?.[phase.index] && (
-            <div className="panel panel-info">
+            <div className="panel panel-info" key={`why-${phase.index}`}>
               <div className="explain">
                 {result && <CaseRecap puzzle={puzzle} round={puzzle.rounds[phase.index]} row={result.row} />}
                 {puzzle.explainers[phase.index].red && <SayBubble kind="del" label="RED · why I did that" text={puzzle.explainers[phase.index].red} />}
@@ -662,6 +706,7 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
                   </ul>
                 </div>
               )}
+              {puzzle.world && <WorldCard world={puzzle.world} title="WHY IT MATTERS" />}
               {puzzle.code && <CodeCard code={puzzle.code} />}
               <a className="pr-card" href={puzzle.pr.url} target="_blank" rel="noreferrer">
                 <span className="pr-repo">{puzzle.pr.repository} #{puzzle.pr.number}</span>

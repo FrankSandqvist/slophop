@@ -52,6 +52,28 @@ type Options = {
   beat?: number;
 };
 
+export { HEAD_SIZE };
+
+/**
+ * Just a mascot's head, at (x, y), for logos and badges. Red is mirrored like his body (the two face each other).
+ * Pass `t` (seconds) to let them blink; `silhouette` paints every pixel one colour (for drop shadows).
+ */
+export function drawHead(ctx: CanvasRenderingContext2D, kind: MascotKind, x: number, y: number, options: { t?: number; silhouette?: string } = {}) {
+  const palette = PALETTES[kind];
+  const seed = kind === "add" ? 0 : 1.7;
+  const blinking = options.t !== undefined && (options.t + seed * 2.3) % 4.2 < 0.13;
+  for (let row = 0; row < HEAD_SIZE; row++) {
+    for (let column = 0; column < HEAD_SIZE; column++) {
+      const source = kind === "del" ? HEAD_SIZE - 1 - column : column;
+      let cell = HEAD[row][source];
+      if (cell === ".") continue;
+      if (blinking && EYES.has(`${source},${row}`)) cell = (source < 9 && row === 8) || (source > 9 && row === 9) ? "C" : "B";
+      ctx.fillStyle = options.silhouette ?? (cell === "A" ? palette.outline : cell === "B" ? palette.fill : palette.ink);
+      ctx.fillRect(x + column, y + row, 1, 1);
+    }
+  }
+}
+
 /**
  * Draws one frame of a mascot into a MASCOT_W x MASCOT_H context. `t` is in seconds.
  * Red (removals) is mirrored so the two face each other.

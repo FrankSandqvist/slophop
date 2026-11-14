@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { drawMascot, MASCOT_H, MASCOT_W, type MascotKind } from "@/lib/mascot";
+import { drawHead, drawMascot, HEAD_SIZE, MASCOT_H, MASCOT_W, type MascotKind } from "@/lib/mascot";
 import { sfx } from "@/lib/sound";
 import { changedInput, formatNumber, outcome, type Puzzle, type PuzzleRow } from "@/lib/types";
 
@@ -425,6 +425,25 @@ export function RuleBubble({ rules, side }: { rules: { old: string[]; new: strin
       {side === "new" && <MascotHead kind="add" />}
     </div>
   );
+}
+
+/** A mascot's face as a little pixel icon (19px, shown 2x with hard pixels). Blinks now and then. */
+export function FaceIcon({ kind, className = "" }: { kind: MascotKind; className?: string }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const context = ref.current?.getContext("2d");
+    if (!context) return;
+    let frame = 0;
+    const start = performance.now();
+    const loop = () => {
+      context.clearRect(0, 0, HEAD_SIZE, HEAD_SIZE);
+      drawHead(context, kind, 0, 0, { t: (performance.now() - start) / 1000 });
+      frame = requestAnimationFrame(loop);
+    };
+    loop();
+    return () => cancelAnimationFrame(frame);
+  }, [kind]);
+  return <canvas ref={ref} className={`mascot face-icon ${className}`} width={HEAD_SIZE} height={HEAD_SIZE} aria-hidden />;
 }
 
 /** One mascot saying one thing, in a speech bubble from their head (Red on the left, Green on the right). */

@@ -16,12 +16,16 @@ export type PullRequestSource = {
   repo: string;
   /** The AI coding tool the PR itself says made it (signature footer, agent author, Codex link), or null. Never guessed. */
   madeWith: string | null;
+  /** The repository's GitHub stars (how widely known it is), its description and homepage. */
+  stars: number | null;
+  repoDescription: string;
+  homepage: string;
   /** Commit the PR's code is read at (merge commit when merged, else head). */
   ref: string;
   changedFiles: string[];
 };
 
-type SearchItem = { html_url: string; user: { login: string }; title: string; body: string | null; labels?: Array<{ name: string }> };
+type SearchItem = { html_url: string; user: { login: string }; title: string; body: string | null; labels?: Array<{ name: string }>; stars?: number };
 type PullFile = { filename: string; status: string; additions: number; deletions: number; patch?: string };
 type Pull = {
   html_url: string;
@@ -29,6 +33,7 @@ type Pull = {
   body: string | null;
   user: { login: string };
   labels?: Array<{ name: string }>;
+  base?: { repo?: { stargazers_count?: number; description?: string | null; homepage?: string | null } };
   merged_at: string | null;
   merge_commit_sha: string | null;
   number: number;
@@ -225,6 +230,9 @@ async function toSource(loaded: LoadedPull, withContext = true): Promise<PullReq
     body: (pull.body ?? "").slice(0, 3000),
     author: pull.user.login,
     madeWith: madeWithTool(pull),
+    stars: pull.base?.repo?.stargazers_count ?? null,
+    repoDescription: (pull.base?.repo?.description ?? "").slice(0, 300),
+    homepage: pull.base?.repo?.homepage ?? "",
     mergedAt: pull.merged_at,
     diff: buildDiff(files),
     context: withContext ? await loadContext(loaded) : "",
@@ -247,15 +255,54 @@ export async function getPullRequest(url: string): Promise<PullRequestSource> {
  * Many random merged public PRs with puzzle-sized logic (diffs only, no surrounding code yet), ordered by a quick
  * branching-logic heuristic. Several searches run in parallel. Use `addContext` on the one you pick.
  */
+/** Repos at least this popular are preferred (more players know them); smaller ones only fill gaps. */
+const MIN_STARS = Number(process.env.MIN_STARS || 50);
+
+/**
+ * GitHub's PR search can't filter by stars, but its GraphQL version returns each PR's repo star count in the same request,
+ * so small repos can be skipped before loading anything. Falls back to REST search (no stars) without a token or on error.
+ */
+async function searchPulls(query: string): Promise<SearchItem[]> {
+  if (process.env.GITHUB_TOKEN) {
+    try {
+      const response = await fetch("https://api.github.com/graphql", {
+        method: "POST",
+        headers: { ...headers(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: `query($q: String!) { search(query: $q, type: ISSUE, first: 100) { nodes { ... on PullRequest {
+            url title body author { login } labels(first: 5) { nodes { name } } repository { stargazerCount } } } } }`,
+          variables: { q: query },
+        }),
+        cache: "no-store",
+      });
+      const json = (await response.json()) as {
+        data?: { search?: { nodes?: Array<{ url?: string; title?: string; body?: string; author?: { login?: string }; labels?: { nodes?: Array<{ name: string }> }; repository?: { stargazerCount?: number } }> } };
+      };
+      const nodes = json.data?.search?.nodes;
+      if (response.ok && nodes) {
+        return nodes
+          .filter((node) => node.url)
+          .map((node) => ({
+            html_url: node.url!,
+            title: node.title ?? "",
+            body: node.body ?? "",
+            user: { login: node.author?.login ?? "" },
+            labels: node.labels?.nodes ?? [],
+            stars: node.repository?.stargazerCount ?? 0,
+          }));
+      }
+    } catch {}
+  }
+  return (await gh<{ items: SearchItem[] }>(`/search/issues?q=${encodeURIComponent(query)}&sort=updated&order=desc&per_page=100&page=${1 + Math.floor(Math.random() * 2)}`)).items;
+}
+
 export async function findCandidatePullRequests(count = 50): Promise<PullRequestSource[]> {
-  // Four searches of 100 (the max per page), at most two at a time: GitHub's search API has a burst ("secondary") limit
-  // that parallel searches trip easily.
-  // Two general searches plus one aimed at numbers and one at looks, so every kind of puzzle has candidates.
+  // Four searches of 100, at most two at a time: GitHub's search API has a burst ("secondary") limit that parallel
+  // searches trip easily. Two general searches plus one aimed at numbers and one at looks, so every kind has candidates.
+  // All require an approved review: that lands in real team projects (~30% with 50+ stars vs ~5% without).
   const shuffled = (list: string[]) => [...list].sort(() => Math.random() - 0.5);
-  const queries = [...shuffled(SEARCHES.general).slice(0, 2), shuffled(SEARCHES.numeric)[0], shuffled(SEARCHES.visual)[0]];
-  const searched = await settleLimited(queries, 2, (query) =>
-    gh<{ items: SearchItem[] }>(`/search/issues?q=${encodeURIComponent(query)}&sort=updated&order=desc&per_page=100&page=${1 + Math.floor(Math.random() * 2)}`).then((result) => result.items),
-  );
+  const queries = [...shuffled(SEARCHES.general).slice(0, 2), shuffled(SEARCHES.numeric)[0], shuffled(SEARCHES.visual)[0]].map((query) => `${query} review:approved`);
+  const searched = await settleLimited(queries, 2, searchPulls);
   if (searched.every((result) => result.status === "rejected")) {
     throw new Error("GitHub asked us to slow down for a few minutes. Try again soon, or paste a PR link.");
   }
@@ -269,6 +316,8 @@ export async function findCandidatePullRequests(count = 50): Promise<PullRequest
     .filter((item) => madeWithTool(item))
     .filter((item) => (seen.has(item.html_url) ? false : (seen.add(item.html_url), true)))
     .sort(() => Math.random() - 0.5)
+    // Well-known repos first; smaller ones only fill the remaining slots.
+    .sort((a, b) => Number((b.stars ?? 0) >= MIN_STARS) - Number((a.stars ?? 0) >= MIN_STARS))
     .slice(0, Math.ceil(count * 1.4));
   if (!items.length) throw new Error("GitHub search came back empty. Try again in a minute.");
 
@@ -281,9 +330,12 @@ export async function findCandidatePullRequests(count = 50): Promise<PullRequest
   ).map((result) => (result.status === "fulfilled" ? result.value : null));
   const best = loaded
     .filter((pull): pull is LoadedPull => Boolean(pull && pull.score > 0 && madeWithTool(pull.pull)))
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => known(b) * b.score - known(a) * a.score)
     .slice(0, count);
   if (!best.length) throw new Error("Couldn't find puzzle-worthy PRs this time. Try again!");
+  function known(pull: LoadedPull) {
+    return (pull.pull.base?.repo?.stargazers_count ?? 0) >= MIN_STARS ? 1.3 : 1;
+  }
   return Promise.all(best.map((pull) => toSource(pull, false)));
 }
 

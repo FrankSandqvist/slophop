@@ -184,9 +184,22 @@ export function validateNumeric(design: NumericDesign): NumericModel {
 const pick = <T,>(items: T[]) => items[Math.floor(Math.random() * items.length)];
 const shuffle = <T,>(items: T[]) => [...items].sort(() => Math.random() - 0.5);
 
-/** Key it in, find the split, how much more, reach a target, what did Red say. 3-5 steps, built from the points. */
+/**
+ * How many steps a number puzzle deserves: 2, plus one per point where Red and Green start or stop agreeing, plus one if
+ * Green levels off at a limit (max 5). A single flat change doesn't need five questions.
+ */
+export function numericBudget(model: NumericModel) {
+  const { points } = model;
+  const flips = points.filter((point, index) => index > 0 && (point.old === point.new) !== (points[index - 1].old === points[index - 1].new)).length;
+  const last = points[points.length - 1].new;
+  const plateau = points.filter((point) => point.new === last).length >= 2 && points.some((point) => point.new !== last);
+  return Math.max(2, Math.min(5, 2 + flips + (plateau ? 1 : 0)));
+}
+
+/** Key it in, find the split, how much more, reach a target, what did Red say. 2-5 steps (see numericBudget). */
 export function buildNumericRounds(model: NumericModel): Round[] {
   const { points } = model;
+  const limit = numericBudget(model);
   const differing = points.filter((point) => point.old !== point.new);
   const opener: Round[] = [];
   const first = pick(differing);
@@ -209,7 +222,7 @@ export function buildNumericRounds(model: NumericModel): Round[] {
   if (forRed.length) middle.push({ kind: "num-predict", x: pick(forRed).x, side: "old" });
   const same = points.filter((point) => point.old === point.new);
   if (same.length) middle.push({ kind: "num-predict", x: pick(same).x, side: "new" });
-  return [...opener, ...shuffle(middle)].slice(0, 5);
+  return [...opener, ...shuffle(middle)].slice(0, limit);
 }
 
 /* ---------- Looks ---------- */
@@ -354,9 +367,20 @@ export function validateVisual(design: VisualDesign): VisualModel {
   return { frame: { ...frame }, states: usable };
 }
 
-/** One step per situation (seeing both pictures gives the next answer away): pick Green's picture, or tap what changed. */
+/**
+ * One step per situation (seeing both pictures gives the next answer away): pick Green's picture, or tap what changed.
+ * Situations whose change is the same elements as an earlier one are skipped: same lesson, no new step.
+ */
 export function buildVisualRounds(model: VisualModel): Round[] {
-  return model.states.slice(0, 4).map((state, index): Round =>
+  const seen = new Set<string>();
+  const distinct = model.states.filter((state) => {
+    const signature = [...state.changed].sort().join("|");
+    if (seen.has(signature)) return false;
+    seen.add(signature);
+    return true;
+  });
+  const states = distinct.length >= 2 ? distinct : model.states.slice(0, 2);
+  return states.slice(0, 4).map((state, index): Round =>
     index % 2 === 0 ? { kind: "vis-which", state: state.id, greenFirst: Math.random() < 0.5 } : { kind: "vis-spot", state: state.id },
   );
 }

@@ -59,6 +59,22 @@ export type Round =
   /** Two pictures of the same situation: which one is Green's? `greenFirst` says which side it's on. */
   | { kind: "vis-which"; state: string; greenFirst: boolean };
 
+/** A company behind or using the project. `role`: maker (builds it) or user (runs it). Brand fields come from context.dev. */
+export type WorldCompany = {
+  name: string;
+  domain: string;
+  role: "maker" | "user";
+  note: string;
+  logo?: string;
+  /** context.dev's logo mode: "dark" logos are light-coloured (made for dark backgrounds), so they get a dark tile. */
+  logoMode?: string;
+  color?: string;
+  description?: string;
+  industry?: string;
+};
+/** "How does this affect the world": who the project reaches and what this change means for them. */
+export type World = { headline: string; reach: string; impact: string; companies: WorldCompany[]; sources: Array<{ title: string; url: string }> };
+
 /** After a step: Red and Green each explain their result in that exact case (first person), plus the takeaway. */
 export type Explainer = { red: string; green: string; why: string };
 
@@ -87,7 +103,7 @@ export type Puzzle = {
   id: string;
   createdAt: string;
   /** `madeWith`: the AI coding tool the PR's own signature names (never guessed); null when it has none. */
-  pr: { url: string; repository: string; number: number; title: string; author: string; mergedAt: string | null; madeWith?: string | null };
+  pr: { url: string; repository: string; number: number; title: string; author: string; mergedAt: string | null; madeWith?: string | null; stars?: number | null };
   /** The PRs the designer chose from. */
   candidates: Array<{ repository: string; number: number; title: string; url: string }>;
   pickReason: string;
@@ -112,6 +128,8 @@ export type Puzzle = {
   rounds: Round[];
   /** One per round (same order): why Red and Green did what they did in that exact case. Shown after each reveal. */
   explainers?: Explainer[];
+  /** How this change reaches the real world: researched by Gemini with Google Search, companies enriched by context.dev. */
+  world?: World | null;
   /** The real diff lines behind the component, cut from the PR on the server. */
   code: { file: string; lines: string[] } | null;
   /** Two Gemini-designed props for the stage, built from primitives in the PS1 style. */

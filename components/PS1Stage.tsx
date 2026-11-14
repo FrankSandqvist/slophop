@@ -179,6 +179,7 @@ function drawBoard(ctx: CanvasRenderingContext2D, show: StageShow | undefined, t
 
   if (mode === "idle") {
     const bounce = Math.round(Math.abs(Math.sin(t * 3)) * -3);
+    // Plain letters here: the mascots stand right in front of the TV, so faces in the logo would double them up.
     const slop = textWidth("SLOP") * 3;
     const x = Math.round((BOARD_W - (slop + 4 + textWidth("HOP") * 3)) / 2);
     drawText(ctx, "SLOP", x + 2, 25 + bounce + 2, "#1b1a22", 3);

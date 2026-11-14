@@ -33,7 +33,7 @@ function apiKey() {
   return key;
 }
 
-type Block = { type?: string; text?: string; data?: string; mime_type?: string; uri?: string };
+type Block = { type?: string; text?: string; data?: string; mime_type?: string; uri?: string; annotations?: Array<{ type?: string; url?: string; title?: string }> };
 type Step = { type?: string; content?: Block[] };
 type Interaction = { id?: string; status?: string; steps?: Step[]; error?: { message?: string } };
 
@@ -124,7 +124,9 @@ export async function generateJson<T>(options: {
   thinking?: string;
   maxOutputTokens?: number;
   signal?: AbortSignal;
-}): Promise<{ data: T; model: string }> {
+  /** Fallback models to walk on overload (default: the shared FALLBACKS). */
+  fallbacks?: string[];
+}): Promise<{ data: T; model: string; citations: Array<{ title: string; url: string }> }> {
   const { interaction, model } = await call(
     {
       model: options.model,
@@ -140,9 +142,15 @@ export async function generateJson<T>(options: {
       },
     },
     options.signal,
-    FALLBACKS,
+    options.fallbacks ?? FALLBACKS,
   );
-  return { data: extractJson<T>(outputTexts(interaction)), model };
+  // Grounded answers (e.g. Google Search) may carry url_citation annotations on their text.
+  const citations = (interaction.steps ?? [])
+    .flatMap((step) => step.content ?? [])
+    .flatMap((block) => block.annotations ?? [])
+    .filter((annotation) => annotation.type === "url_citation" && annotation.url)
+    .map((annotation) => ({ title: annotation.title || annotation.url!, url: annotation.url! }));
+  return { data: extractJson<T>(outputTexts(interaction)), model, citations };
 }
 
 export async function generateMusic(options: { prompt: string; signal?: AbortSignal }) {
