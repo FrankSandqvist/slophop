@@ -5,6 +5,19 @@ let context: AudioContext | null = null;
 let master: GainNode | null = null;
 let muted = false;
 
+/** A short trail of what the audio did, for the ?audiodebug panel (phones can't show a console). */
+const trail: string[] = [];
+export function audioLog(message?: string) {
+  if (message) {
+    trail.push(`${(performance.now() / 1000).toFixed(1)}s ${message}`);
+    if (trail.length > 10) trail.shift();
+  }
+  return trail;
+}
+export function audioState() {
+  return context?.state ?? "none";
+}
+
 function createContext() {
   if (!context) {
     const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -52,12 +65,13 @@ export function unlockAudio() {
 // Unlock on every finished tap, click or key press until audio is actually running, on any page of the app.
 if (typeof window !== "undefined") {
   const events = ["pointerup", "touchend", "click", "keydown"] as const;
-  const unlock = () => {
+  const unlock = (event: Event) => {
     if (context?.state === "running") {
       for (const name of events) window.removeEventListener(name, unlock, true);
       return;
     }
     unlockAudio();
+    audioLog(`unlock on ${event.type}: ${context?.state ?? "no context"}`);
   };
   for (const name of events) window.addEventListener(name, unlock, { capture: true, passive: true });
 }
@@ -239,10 +253,24 @@ export function musicBeat(): { bpm: number; beat: number } | null {
  */
 export async function playLoop(url: string, bpm = 96): Promise<(() => void) | null> {
   const ctx = audio();
-  if (!ctx || !master) return null;
-  const response = await fetch(url);
-  if (!response.ok) return null;
-  const buffer = loopable(ctx, await ctx.decodeAudioData(await response.arrayBuffer()), bpm);
+  if (!ctx || !master) {
+    audioLog("music: no audio yet (needs a tap)");
+    return null;
+  }
+  audioLog(`music: loading (${ctx.state})`);
+  let buffer: AudioBuffer;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      audioLog(`music: fetch failed ${response.status}`);
+      return null;
+    }
+    buffer = loopable(ctx, await ctx.decodeAudioData(await response.arrayBuffer()), bpm);
+  } catch (error) {
+    audioLog(`music: ${error instanceof Error ? error.message : "failed"}`);
+    return null;
+  }
+  audioLog(`music: playing (${ctx.state})`);
   const source = ctx.createBufferSource();
   const gain = ctx.createGain();
   source.buffer = buffer;

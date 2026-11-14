@@ -82,7 +82,9 @@ a { color: inherit; }
 .gen-progress { position: absolute; top: 6px; left: 6px; display: flex; align-items: center; gap: 6px; padding: 0 6px; background: var(--ink); color: #fff; font-size: 16px; white-space: nowrap; pointer-events: none; }
 .gen-bar { display: block; width: 72px; height: 10px; border: 2px solid #fff; }
 .gen-bar i { display: block; height: 100%; background: var(--yellow); }
+.press-start-cover { position: absolute; inset: 0; padding: 0; border: 0; background: transparent; cursor: pointer; }
 .press-start { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); padding: 0 8px; background: var(--ink); color: var(--yellow); font-size: 16px; white-space: nowrap; pointer-events: none; animation: blink 1.2s steps(2) infinite; }
+.audio-debug { position: absolute; top: 4px; left: 4px; z-index: 9; max-width: calc(100% - 8px); margin: 0; padding: 4px 6px; background: rgba(27, 26, 34, .85); color: #fff; font: 16px/18px var(--code, monospace); white-space: pre-wrap; pointer-events: none; }
 
 /* ---------- Pixel buttons ---------- */
 .px-btn {

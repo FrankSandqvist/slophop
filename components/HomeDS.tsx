@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { MascotKind } from "@/lib/mascot";
-import { playLoop, sfx, unlockAudio } from "@/lib/sound";
+import { audioLog, audioState, playLoop, sfx, unlockAudio } from "@/lib/sound";
 import type { PropSpec, Puzzle, StageCard } from "@/lib/types";
 import { DSShell, TextBox, type Line } from "./DS";
 import { Logo } from "./Logo";
@@ -248,6 +248,17 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
   // that already happened (e.g. back from a puzzle), otherwise on the first one, with a blinking "TAP TO START" until then.
   const hasTracks = puzzles.some((puzzle) => puzzle.musicFile);
   const [musicOn, setMusicOn] = useState(false);
+  // ?audiodebug: a small on-screen panel with the audio state and what happened (phones have no console to look at).
+  const [audioDebug, setAudioDebug] = useState<{ state: string; active: string; log: string[] } | null>(null);
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has("audiodebug")) return;
+    const update = () => setAudioDebug({ state: audioState(), active: String(navigator.userActivation?.hasBeenActive ?? "n/a"), log: [...audioLog()] });
+    update();
+    const timer = window.setInterval(update, 500);
+    return () => window.clearInterval(timer);
+  }, []);
+  // The TAP TO START cover calls this from its own click: a real button's click is the surest unlock on iPhone.
+  const beginMusic = useRef<() => void>(() => {});
   useEffect(() => {
     const tracks = puzzles.filter((puzzle) => puzzle.musicFile);
     if (!tracks.length) return;
@@ -276,6 +287,7 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
       setMusicOn(true);
       if (stage.current.show) stage.current.show = { ...stage.current.show, beat: true };
     }
+    beginMusic.current = () => void begin();
     for (const name of events) window.addEventListener(name, begin, true);
     if (navigator.userActivation?.hasBeenActive) void begin();
     return () => {
@@ -414,7 +426,17 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
       top={
         <>
           <PS1Stage state={stage} />
-          {hasTracks && !musicOn && !progress && <span className="press-start">▶ TAP TO START ♪</span>}
+          {hasTracks && !musicOn && !progress && (
+            // A real button over the stage (the text box stays on top of it): tapping anywhere up here starts the music.
+            <button className="press-start-cover" onClick={() => beginMusic.current()} aria-label="Start the music">
+              <span className="press-start">▶ TAP TO START ♪</span>
+            </button>
+          )}
+          {audioDebug && (
+            <pre className="audio-debug">
+              {`audio: ${audioDebug.state} · activated: ${audioDebug.active}\n${audioDebug.log.join("\n")}`}
+            </pre>
+          )}
           {progress && (
             <div className="gen-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(percent)} aria-label="Making a puzzle">
               <span>{PROGRESS[progress.stage].label}</span>
