@@ -147,6 +147,11 @@ a { color: inherit; }
 .case-base { margin-top: 8px; }
 .case-base::before { content: "THE CASE"; position: absolute; top: -10px; left: 8px; padding: 0 6px; background: var(--ink); color: #fff; font-size: 16px; line-height: 16px; }
 .step-rules { display: grid; gap: 4px; flex: none; }
+/* After each step: why Red and Green did what they did in that exact case. */
+.explain { display: grid; gap: 8px; }
+.bubble-text { margin: 2px 0 0; }
+.explain-why { margin: 0; padding: 4px 8px; border: 3px solid var(--ink); background: #fff7d6; }
+
 /* Numbers: the keypad (Brain Age style) and the number line. */
 .keypad { display: grid; gap: 4px; }
 .keypad-display { display: flex; align-items: baseline; justify-content: flex-end; gap: 6px; padding: 0 10px; border: 3px solid var(--ink); background: #fff; font-size: 32px; line-height: 40px; }
@@ -300,6 +305,7 @@ a { color: inherit; }
 .code { margin: 0; border: 3px solid var(--ink); background: #14121c; }
 .code figcaption { padding: 2px 8px; background: var(--ink); color: #c9c4d6; font-family: var(--code); font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .code pre { margin: 0; padding: 6px 0; overflow-x: auto; color: #d7d3e2; font-family: var(--code); font-size: 16px; line-height: 20px; }
+.code pre code { display: block; width: max-content; min-width: 100%; font: inherit; }
 .code pre span { display: block; padding: 0 8px; white-space: pre; }
 .code-add { background: rgba(61, 220, 90, .2); color: #b9f5c3; }
 .code-del { background: rgba(255, 71, 87, .2); color: #ffc0c6; }

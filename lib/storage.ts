@@ -1,7 +1,7 @@
 import "server-only";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { get, list, put } from "@vercel/blob";
+import { del, get, list, put } from "@vercel/blob";
 
 /**
  * Tiny storage layer: Vercel Blob when BLOB_READ_WRITE_TOKEN is set,
@@ -47,6 +47,16 @@ export async function readFile(pathname: string): Promise<{ body: Buffer; conten
   } catch {
     return null;
   }
+}
+
+/** Deletes files (Blob pathnames, or local paths under .data). Missing files are ignored. */
+export async function deleteFiles(pathnames: string[]) {
+  if (!pathnames.length) return;
+  if (useBlob) {
+    for (let start = 0; start < pathnames.length; start += 100) await del(pathnames.slice(start, start + 100));
+    return;
+  }
+  await Promise.all(pathnames.map((pathname) => fs.rm(safeLocalPath(pathname), { force: true })));
 }
 
 export async function readText(pathname: string) {

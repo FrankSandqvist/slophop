@@ -22,6 +22,7 @@ import {
   RuleBubble,
   RuleFill,
   RulesSheet,
+  SayBubble,
   TweakPick,
   Vote,
   WhoPick,
@@ -29,7 +30,8 @@ import {
 
 const BPM = 96;
 
-type Phase = { kind: "intro" } | { kind: "round"; index: number } | { kind: "end" };
+/** "explain": after a step's reveal, why Red and Green did what they did in that exact case. */
+type Phase = { kind: "intro" } | { kind: "round"; index: number } | { kind: "explain"; index: number } | { kind: "end" };
 type Result = { row: PuzzleRow; correct: boolean };
 
 function pickLine<T>(options: T[]) {
@@ -46,6 +48,39 @@ function claimText(puzzle: Puzzle, round: Extract<Round, { kind: "claim" }>) {
 }
 
 const stateOf = (puzzle: Puzzle, id: string) => puzzle.visual?.states.find((state) => state.id === id);
+
+/** The case a step was about, as a compact recap above its explainer: the values and what each of them did. */
+function CaseRecap({ puzzle, round, row }: { puzzle: Puzzle; round: Round; row: PuzzleRow }) {
+  if (puzzle.numeric && row.key.startsWith("x~")) {
+    const x = Number(row.key.slice(2));
+    return (
+      <>
+        <NumberCase model={puzzle.numeric} x={x} />
+        <NumberResults model={puzzle.numeric} x={x} />
+      </>
+    );
+  }
+  if (puzzle.visual && (round.kind === "vis-which" || round.kind === "vis-spot")) {
+    const state = stateOf(puzzle, round.state);
+    return (
+      <div className="case case-base">
+        <span className="chips">
+          <span className="chip">{state?.label}</span>
+        </span>
+        <span className="case-note">{state?.story}</span>
+      </div>
+    );
+  }
+  if (!puzzle.table.some((entry) => entry.key === row.key)) return null;
+  return (
+    <>
+      <div className="case case-base">
+        <CaseChips puzzle={puzzle} row={row} />
+      </div>
+      <Outcomes puzzle={puzzle} row={row} />
+    </>
+  );
+}
 
 /** Whose rules a step is about: Red's for "what did Red do", both when you must tell them apart, else Green's. */
 function rulesFor(round: Round): Array<"old" | "new"> {
@@ -263,6 +298,23 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
     setLineIndex(Number.MAX_SAFE_INTEGER);
   }
 
+  /** After a reveal: the case explainer if there is one, else straight on. */
+  function afterReveal(index: number) {
+    const explainer = puzzle.explainers?.[index];
+    if (!explainer || !(explainer.red || explainer.green)) return startRound(index + 1);
+    sfx.select();
+    setRulesOpen(false);
+    setPhase({ kind: "explain", index });
+    // Red, then Green, then the takeaway, one tap at a time on the top screen.
+    const lines: Line[] = [
+      ...(explainer.red ? [{ who: "del" as const, text: explainer.red }] : []),
+      ...(explainer.green ? [{ who: "add" as const, text: explainer.green }] : []),
+      ...(explainer.why ? [{ who: "narrator" as const, text: explainer.why }] : []),
+    ];
+    setLineIndex(script.length);
+    setScript([...script, ...lines]);
+  }
+
   function startRound(index: number) {
     const next = puzzle.rounds[index];
     setRulesOpen(false);
@@ -271,7 +323,7 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
       setPhase({ kind: "end" });
       mood("add", "dance");
       mood("del", "dance");
-      say({ who: "add", text: "That's the change! Every vote you left goes straight onto the pull request's crowd check." });
+      say({ who: "add", text: "That's the change! Every vote you left adds to the crowd check on this pull request." });
       return;
     }
     setFmvPlaying(false);
@@ -444,7 +496,9 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
           <div className="play-bar">
             <Link href="/" className="px-btn px-btn-icon" aria-label="Back to the menu">◀</Link>
             {/* During a step the bar shows its one-line goal (saves a row on the fixed screen). */}
-            <span className={`play-title ${round && phase.kind === "round" ? "play-goal" : ""}`}>{round && phase.kind === "round" ? goalOf(puzzle, round) : puzzle.title}</span>
+            <span className={`play-title ${round && phase.kind === "round" ? "play-goal" : ""}`}>
+              {round && phase.kind === "round" ? goalOf(puzzle, round) : phase.kind === "explain" ? `Why? Step ${phase.index + 1} of ${puzzle.rounds.length}` : puzzle.title}
+            </span>
             <button className="px-btn px-btn-small" onClick={() => setRulesOpen((open) => !open)} aria-expanded={rulesOpen}>Rules</button>
             <button
               className="px-btn px-btn-icon"
@@ -561,11 +615,29 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
               {result && (
                 <div className="after">
                   <Vote key={`${phase.index}-${result.row.key}`} puzzleId={puzzle.id} row={result.row} initial={initialVotes[result.row.key]} />
-                  <button className="px-btn px-btn-go" onClick={() => startRound(phase.index + 1)}>
-                    {phase.index + 1 < puzzle.rounds.length ? "Next ▶" : "Finish ▶"}
+                  <button className="px-btn px-btn-go" onClick={() => afterReveal(phase.index)}>
+                    {puzzle.explainers?.[phase.index]?.red ? "Why? ▶" : phase.index + 1 < puzzle.rounds.length ? "Next ▶" : "Finish ▶"}
                   </button>
                 </div>
               )}
+            </div>
+          )}
+
+          {phase.kind === "explain" && puzzle.explainers?.[phase.index] && (
+            <div className="panel panel-info">
+              <div className="explain">
+                {result && <CaseRecap puzzle={puzzle} round={puzzle.rounds[phase.index]} row={result.row} />}
+                {puzzle.explainers[phase.index].red && <SayBubble kind="del" label="RED · why I did that" text={puzzle.explainers[phase.index].red} />}
+                {puzzle.explainers[phase.index].green && <SayBubble kind="add" label="GREEN · why I do this" text={puzzle.explainers[phase.index].green} />}
+                {puzzle.explainers[phase.index].why && (
+                  <p className="explain-why">
+                    <span className="tag">SO</span> {puzzle.explainers[phase.index].why}
+                  </p>
+                )}
+              </div>
+              <button className="px-btn px-btn-go panel-sticky" onClick={() => startRound(phase.index + 1)}>
+                {phase.index + 1 < puzzle.rounds.length ? "Next puzzle ▶" : "See results ▶"}
+              </button>
             </div>
           )}
 

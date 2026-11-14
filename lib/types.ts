@@ -59,6 +59,9 @@ export type Round =
   /** Two pictures of the same situation: which one is Green's? `greenFirst` says which side it's on. */
   | { kind: "vis-which"; state: string; greenFirst: boolean };
 
+/** After a step: Red and Green each explain their result in that exact case (first person), plus the takeaway. */
+export type Explainer = { red: string; green: string; why: string };
+
 /** What a puzzle is about: a decision (logic), a calculation (numeric) or how something looks (visual). */
 export type PuzzleFamily = "logic" | "numeric" | "visual";
 
@@ -107,6 +110,8 @@ export type Puzzle = {
   numeric?: NumericModel;
   visual?: VisualModel;
   rounds: Round[];
+  /** One per round (same order): why Red and Green did what they did in that exact case. Shown after each reveal. */
+  explainers?: Explainer[];
   /** The real diff lines behind the component, cut from the PR on the server. */
   code: { file: string; lines: string[] } | null;
   /** Two Gemini-designed props for the stage, built from primitives in the PS1 style. */
@@ -213,6 +218,7 @@ export function roundTo(value: number, decimals: number) {
 export function formatNumber(value: number, unit: string, decimals = 0) {
   const text = roundTo(value, decimals).toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
   if (!unit) return text;
+  if (unit === "%") return `${text}%`;
   return /^[$€£¥]$/.test(unit) ? `${value < 0 ? "-" : ""}${unit}${text.replace("-", "")}` : `${text} ${unit}`;
 }
 

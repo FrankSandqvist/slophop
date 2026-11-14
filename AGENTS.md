@@ -92,6 +92,9 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
   Green starts to differ, where it first hits a target; Green's line appears after answering).
 - Visual steps: `vis-which` (two mock screens: which is Green's?) and `vis-spot` (tap what changed in Green's picture; then it
   flips between before and after with the change outlined). One step per situation (seeing both gives the next answer away).
+- After each step's reveal (and after the last, before the summary): a "Why?" screen for that exact case. Red and Green each
+  explain their result in first person, plus a takeaway (`puzzle.explainers`, one per round, written by one Hydrogen call in
+  `lib/explain.ts` from a precise description of each step's case; generated in parallel with the music/cutscene).
 - Crowd signal: after each reveal, "Is Green's way right for this case?" → `votes/{id}/{rowKey}/{right|off}/{ts}.json`.
 
 ## Enforced components and style
@@ -121,7 +124,7 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
 - Next.js 16 App Router + TypeScript, three.js 0.170, plain CSS.
 - `lib/gemini.ts` — Interactions API (`Api-Revision: 2026-05-20`): `generateJson` (background + polling, optional built-in tools,
   robust JSON extraction), `generateMusic`. Gemini 4: no sampling params, thinking `low|medium|high`.
-- `lib/storage.ts` — Vercel Blob when `BLOB_READ_WRITE_TOKEN` is set, else local `.data/`.
+- `lib/storage.ts` — Vercel Blob when `BLOB_READ_WRITE_TOKEN` is set, else local `.data/` (save, read, list, delete).
 - API: `POST /api/puzzles` (NDJSON progress), `GET /api/puzzles/[id]/music`, `GET /api/puzzles/[id]/fmv`, `POST /api/puzzles/[id]/votes`.
 
 ## Rules

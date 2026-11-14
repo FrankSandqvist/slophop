@@ -15,6 +15,7 @@ import {
   type NumericDesign,
   type VisualDesign,
 } from "./families";
+import { explainRounds } from "./explain";
 import { settleLimited } from "./limit";
 import { mascotReferences } from "./sprites";
 import { listFiles, readText, saveFile } from "./storage";
@@ -897,7 +898,32 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
         : `${result.visual.states.length} situations`;
   emit({ type: "stage", stage: "model", status: "done", detail });
 
-  const [musicFile, flair, fmv] = await Promise.all([musicTask, flairTask, fmvTask]);
+  // Rounds come from our code; the case explainers (one Gemini call) run while the music and cutscene finish.
+  const rules = {
+    old: (data.rules?.old ?? []).slice(0, 4).map((line) => String(line).slice(0, 140)),
+    new: (data.rules?.new ?? []).slice(0, 4).map((line) => String(line).slice(0, 140)),
+  };
+  const family = {
+    family: result.family,
+    inputs: result.family === "logic" ? result.inputs : [],
+    outcomes: result.family === "logic" ? result.outcomes : [],
+    table: result.family === "logic" ? result.table : [],
+    ...(result.family === "numeric" ? { numeric: result.numeric } : {}),
+    ...(result.family === "visual" ? { visual: result.visual } : {}),
+  };
+  const rounds =
+    result.family === "logic"
+      ? buildRounds(result.table, result.outcomes, result.inputs)
+      : result.family === "numeric"
+        ? buildNumericRounds(result.numeric)
+        : buildVisualRounds(result.visual);
+  const explainTask = explainRounds({ ...family, project: String(data.project ?? ""), change: String(data.change ?? ""), scenario: String(data.scenario ?? ""), rules, rounds }, signal).catch(
+    (error: unknown) => {
+      console.error("Case explainers failed", error);
+      return undefined;
+    },
+  );
+  const [musicFile, flair, fmv, explainers] = await Promise.all([musicTask, flairTask, fmvTask, explainTask]);
   emit({ type: "stage", stage: "save", status: "active" });
   const puzzle: Puzzle = {
     format: FORMAT,
@@ -911,24 +937,12 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
     change: String(data.change ?? ""),
     where: String(data.where ?? ""),
     scenario: String(data.scenario ?? ""),
-    rules: {
-      old: (data.rules?.old ?? []).slice(0, 4).map((line) => String(line).slice(0, 140)),
-      new: (data.rules?.new ?? []).slice(0, 4).map((line) => String(line).slice(0, 140)),
-    },
+    rules,
     component: { name: String(data.component?.name ?? ""), what: String(data.component?.what ?? ""), file: String(data.component?.file ?? "") },
     lines: { add: String(data.lines?.add ?? ""), del: String(data.lines?.del ?? "") },
-    family: result.family,
-    inputs: result.family === "logic" ? result.inputs : [],
-    outcomes: result.family === "logic" ? result.outcomes : [],
-    table: result.family === "logic" ? result.table : [],
-    ...(result.family === "numeric" ? { numeric: result.numeric } : {}),
-    ...(result.family === "visual" ? { visual: result.visual } : {}),
-    rounds:
-      result.family === "logic"
-        ? buildRounds(result.table, result.outcomes, result.inputs)
-        : result.family === "numeric"
-          ? buildNumericRounds(result.numeric)
-          : buildVisualRounds(result.visual),
+    ...family,
+    rounds,
+    ...(explainers ? { explainers } : {}),
     code: resolveCode(data.codeAnchor, pr.diff),
     props: flair.props,
     musicStyle: flair.music,

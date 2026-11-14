@@ -427,6 +427,23 @@ export function RuleBubble({ rules, side }: { rules: { old: string[]; new: strin
   );
 }
 
+/** One mascot saying one thing, in a speech bubble from their head (Red on the left, Green on the right). */
+export function SayBubble({ kind, label, text }: { kind: MascotKind; label: string; text: string }) {
+  const bubble = (
+    <div className={`bubble bubble-${kind}`}>
+      <span className="bubble-who">{label}</span>
+      <p className="bubble-text">{text}</p>
+    </div>
+  );
+  return (
+    <div className={`speaker speaker-${kind}`}>
+      {kind === "del" && <MascotHead kind="del" />}
+      {bubble}
+      {kind === "add" && <MascotHead kind="add" />}
+    </div>
+  );
+}
+
 /** The two talking: Red says his old rules, Green his new ones. */
 function RuleBubbles({ rules }: { rules: { old: string[]; new: string[] } }) {
   return (
@@ -543,15 +560,18 @@ export function CodeCard({ code }: { code: NonNullable<Puzzle["code"]> }) {
     <figure className="code">
       <figcaption>{code.file}</figcaption>
       <pre>
-        {code.lines.map((line, index) => {
-          const kind = line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "ctx";
-          return (
-            <span key={index} className={`code-${kind}`}>
-              {line || " "}
-              {"\n"}
-            </span>
-          );
-        })}
+        {/* One block as wide as the longest line, so the line colours follow horizontal scrolling. */}
+        <code>
+          {code.lines.map((line, index) => {
+            const kind = line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "ctx";
+            return (
+              <span key={index} className={`code-${kind}`}>
+                {line || " "}
+                {"\n"}
+              </span>
+            );
+          })}
+        </code>
       </pre>
     </figure>
   );
