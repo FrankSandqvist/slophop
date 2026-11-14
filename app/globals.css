@@ -8,8 +8,8 @@
      Feedback, primary actions and states use yellow, ink and greys. */
   --ink: #1b1a22;
   --paper: #fffbe9;
-  --shell: #f3f3f6;
-  --bezel: #2a2833;
+  --shell: #cbc8c0;
+  --bezel: #1f1e26;
   --green: #3ddc5a;
   --green-dark: #027d0a;
   --green-light: #82dc88;
@@ -31,8 +31,14 @@ body {
   display: grid;
   place-items: center;
   padding: 10px 12px;
-  background-color: var(--yellow);
-  background-image: repeating-linear-gradient(135deg, transparent 0 22px, rgba(255, 159, 67, .35) 22px 44px);
+  /* Green's side to Red's side through black, with the menu's grid laid over it as darker lines. */
+  background-color: #070709;
+  background-image:
+    linear-gradient(rgba(0, 0, 0, .45) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, .45) 1px, transparent 1px),
+    linear-gradient(90deg, #17241c 0%, #070709 32%, #070709 68%, #2a191b 100%);
+  background-size: 8px 8px, 8px 8px, 100% 100%;
+  background-attachment: fixed;
   color: var(--ink);
   font-family: var(--pixel);
   font-size: 16px;
@@ -47,17 +53,24 @@ a { color: inherit; }
 /* ---------- The handheld ---------- */
 /* Fixed screens (top 5:4, bottom 8:7), sized to the window height so the page never scrolls. */
 .ds {
+  /* Warm light-grey plastic shell, its corner concentric with the screens' (screen radius 4px + 10px padding = 14px). A thin gradient
+     border highlight runs around it: green on Green's side, through grey, to red on Red's side, echoing the page. */
   width: min(520px, calc(100vw - 24px), calc((100dvh - 64px) / 1.675 + 20px));
-  padding: 10px 10px 12px;
-  border-radius: 24px;
-  background: var(--shell);
+  padding: 8px 8px 10px;
+  border: 2px solid transparent;
+  border-radius: 14px;
+  background:
+    linear-gradient(var(--shell), var(--shell)) padding-box,
+    linear-gradient(90deg, #3f9a5a 0%, #e5e1d8 30%, #e5e1d8 70%, #b9424e 100%) border-box;
   box-shadow: 0 0 0 3px var(--ink), 0 12px 0 -1px var(--ink);
 }
 .ds-screen { position: relative; overflow: hidden; border: 5px solid var(--bezel); border-radius: 4px; background: #000; }
 .ds-top { aspect-ratio: 4 / 3; }
 .ds-bottom { aspect-ratio: 25 / 23; background-color: var(--paper); background-image: linear-gradient(rgba(27, 26, 34, .05) 1px, transparent 1px), linear-gradient(90deg, rgba(27, 26, 34, .05) 1px, transparent 1px); background-size: 8px 8px; }
-.ds-hinge { display: flex; justify-content: space-between; height: 12px; padding: 3px 26px; }
-.ds-hinge i { width: 46px; height: 6px; border-radius: 3px; background: #d6d6dc; box-shadow: inset 0 1px 0 #b9b9c1; }
+.ds-hinge { display: flex; align-items: center; justify-content: space-between; height: 12px; padding: 0 26px; }
+/* Model name printed on the shell: hardware lettering, so a plain system sans (the one exception to DotGothic sizes). */
+.ds-label { flex: none; font-family: "Helvetica Neue", Arial, system-ui, sans-serif; font-size: 9px; font-weight: 700; line-height: 1; letter-spacing: .14em; color: #8d897f; text-shadow: 0 1px 0 rgba(255, 255, 255, .55); }
+.ds-hinge i { width: 46px; height: 6px; border-radius: 3px; background: #a9a59c; box-shadow: inset 0 1px 0 #8f8b82; }
 .ps1, .mascot { display: block; image-rendering: crisp-edges; image-rendering: pixelated; }
 .ps1 { margin: 0 auto; }
 
@@ -79,25 +92,29 @@ a { color: inherit; }
 .fmv-canvas { margin: 0 auto; overflow: hidden; }
 .fmv-skip { position: absolute; top: 6px; right: 6px; padding: 0 6px; background: var(--ink); color: #fff; font-size: 16px; animation: blink 1.6s steps(2) infinite; }
 /* Generation progress on the top screen: stage, a chunky bar (5% steps) and the percentage. */
-.gen-progress { position: absolute; top: 6px; left: 6px; display: flex; align-items: center; gap: 6px; padding: 0 6px; background: var(--ink); color: #fff; font-size: 16px; white-space: nowrap; pointer-events: none; }
-.gen-bar { display: block; width: 72px; height: 10px; border: 2px solid #fff; }
-.gen-bar i { display: block; height: 100%; background: var(--yellow); }
+/* Generation progress: a band across the whole top of the top screen, stage | bar | percentage. */
+.gen-progress { position: absolute; top: 0; left: 0; right: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: var(--ink); color: #fff; font-size: 16px; white-space: nowrap; pointer-events: none; }
+.gen-bar { display: block; flex: 1; min-width: 0; height: 14px; border: 2px solid #fff; }
+.gen-bar i { display: block; height: 100%; background: var(--yellow); transition: width .3s steps(3); }
 .press-start-cover { position: absolute; inset: 0; padding: 0; border: 0; background: transparent; cursor: pointer; }
 .press-start { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); padding: 0 8px; background: var(--ink); color: var(--yellow); font-size: 16px; white-space: nowrap; pointer-events: none; animation: blink 1.2s steps(2) infinite; }
 .audio-debug { position: absolute; top: 4px; left: 4px; z-index: 9; max-width: calc(100% - 8px); margin: 0; padding: 4px 6px; background: rgba(27, 26, 34, .85); color: #fff; font: 16px/18px var(--code, monospace); white-space: pre-wrap; pointer-events: none; }
 
 /* ---------- Pixel buttons ---------- */
 .px-btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 8px 14px;
+  /* Bottom padding includes the 4px darker edge, so the label sits centred on the face, not the whole box. */
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 6px 14px 10px;
   border: 3px solid var(--ink); border-radius: 0; background: #fff; color: var(--ink); text-decoration: none; cursor: pointer;
   box-shadow: inset 0 -4px 0 rgba(0, 0, 0, .14), 0 3px 0 var(--ink); transition: transform .04s;
 }
-.px-btn:active:not(:disabled) { transform: translateY(3px); box-shadow: inset 0 -2px 0 rgba(0, 0, 0, .14), 0 0 0 var(--ink); }
+.px-btn:active:not(:disabled) { transform: translateY(3px); padding-top: 7px; padding-bottom: 9px; box-shadow: inset 0 -2px 0 rgba(0, 0, 0, .14), 0 0 0 var(--ink); }
 .px-btn:disabled { opacity: .55; cursor: default; }
 .px-btn-go { background: var(--yellow); }
 .px-btn-warn { background: #fff; }
-.px-btn-small { min-height: 38px; padding: 5px 10px; font-size: 16px; }
-.px-btn-icon { width: 40px; min-height: 36px; padding: 0; }
+.px-btn-small { min-height: 38px; padding: 3px 10px 7px; font-size: 16px; }
+.px-btn-icon { width: 40px; min-height: 36px; padding: 0 0 4px; }
+.px-btn-small:active:not(:disabled) { padding-top: 4px; padding-bottom: 6px; }
+.px-btn-icon:active:not(:disabled) { padding-top: 0; padding-bottom: 2px; }
 
 /* ---------- Home menu ---------- */
 .menu { display: flex; flex-direction: column; gap: 10px; height: 100%; padding: 12px; overflow-y: auto; }
@@ -130,6 +147,9 @@ a { color: inherit; }
 .dim-cover span { padding: 0 8px; background: var(--ink); color: #fff; font-size: 16px; }
 .play-bar { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px; background: var(--ink); color: #fff; }
 .play-bar .px-btn { box-shadow: none; min-height: 36px; }
+/* No darker edge on bar buttons, so no offset either: their labels stay vertically centred. */
+.play-bar .px-btn, .play-bar .px-btn:active:not(:disabled) { padding-top: 5px; padding-bottom: 5px; }
+.play-bar .px-btn-icon, .play-bar .px-btn-icon:active:not(:disabled) { padding: 0; }
 .play-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
 .play-goal { color: var(--yellow); white-space: normal; line-height: 20px; }
 .panel { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 6px 8px 8px; }
@@ -207,6 +227,20 @@ a { color: inherit; }
 .mock-label { color: #6a6576; }
 .mock-green { border-color: var(--green-dark); background: #e1fbe4; }
 .mock-red { border-color: var(--red-dark); background: #ffe3e5; }
+
+/* Generation keeps going in the background: a hint, and a row for each puzzle still being made. */
+.menu-wait { margin: 6px 0 0; padding: 2px 8px; border-left: 6px solid var(--yellow); color: #6a6576; }
+.menu-cooking { cursor: default; color: #6a6576; }
+.menu-spinner { opacity: 1; animation: spin 1.2s steps(4) infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Kind badges: LOGIC (ink), MATH (yellow), LAYOUT (white). Never green/red: those mean Green and Red. */
+.kind-badge { display: inline-block; padding: 0 4px; border: 2px solid var(--ink); font-size: 16px; line-height: 16px; font-weight: normal; vertical-align: 1px; }
+.kind-badges { display: inline-flex; align-items: center; gap: 0; vertical-align: 1px; }
+.kind-plus { margin: 0 3px; color: #6a6576; }
+.kind-logic { background: var(--ink); color: #fff; }
+.kind-numeric { background: var(--yellow); color: var(--ink); }
+.kind-visual { background: #fff; color: var(--ink); }
 
 /* First-time tutorial card. */
 .howto { display: grid; gap: 6px; padding: 6px 10px 8px; border: 3px solid var(--ink); background: #fff; }
@@ -329,8 +363,15 @@ a { color: inherit; }
 .glossary small { font-size: 16px; color: #6a6576; }
 
 /* ---------- End ---------- */
-.score { margin: 4px 0 0; text-align: center; font-size: 32px; }
-.score strong { font-size: 48px; color: var(--ink); }
+/* End screen score: its own card, with line heights that fit the big digits (the page's 20px line would clip them). */
+.score-card { display: grid; justify-items: center; gap: 4px; padding: 6px 12px 10px; border: 3px solid var(--ink); background: #fff; }
+.score-label, .score-note { color: #6a6576; }
+.score { display: flex; align-items: baseline; margin: 0; font-size: 32px; line-height: 48px; }
+.score strong { font-size: 48px; line-height: 48px; font-weight: normal; color: var(--ink); }
+.score-pips { display: flex; gap: 6px; }
+.score-pips i { width: 12px; height: 12px; border: 2px solid var(--ink); }
+.score-pips .pip-right { background: var(--yellow); }
+.score-pips .pip-wrong { background: #d9d6e0; }
 .flags { padding: 8px 10px; border: 3px solid var(--ink); background: #fff; }
 .flags-title { margin: 0 0 4px; }
 .flags ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
@@ -411,11 +452,11 @@ a { color: inherit; }
 /* ---------- Phones: the screens take over, exactly one viewport tall ---------- */
 @media (max-width: 600px) {
   body { display: block; padding: 0; background: var(--bezel); }
-  .ds { display: flex; flex-direction: column; width: 100%; height: 100dvh; padding: 0; border-radius: 0; background: var(--bezel); box-shadow: none; }
+  .ds { display: flex; flex-direction: column; width: 100%; height: 100dvh; padding: 0; border: 0; border-radius: 0; background: var(--bezel); box-shadow: none; }
   .ds-screen { border-width: 0; border-radius: 0; }
   .ds-top { flex: none; }
-  .ds-hinge { height: 6px; padding: 0; }
-  .ds-hinge i { display: none; }
+  /* The hinge stays on phones: a strip of the shell between the two screens, with its pills and model name. */
+  .ds-hinge { flex: none; height: 16px; padding: 0 18px; background: var(--shell); }
   .ds-bottom { flex: 1 1 0; min-height: 0; aspect-ratio: auto; padding-bottom: env(safe-area-inset-bottom); }
 }
 @media (prefers-reduced-motion: reduce) {

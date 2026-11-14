@@ -9,7 +9,12 @@ export function DSShell({ top, bottom }: { top: React.ReactNode; bottom: React.R
   return (
     <div className="ds">
       <section className="ds-screen ds-top" aria-label="Top screen">{top}</section>
-      <div className="ds-hinge" aria-hidden><i /><i /></div>
+      <div className="ds-hinge" aria-hidden>
+        <i />
+        {/* Printed on the "hardware", so not pixel UI text: a plain small sans (see .ds-label). */}
+        <span className="ds-label">PULLBOY ADVANCEST</span>
+        <i />
+      </div>
       <section className="ds-screen ds-bottom" aria-label="Bottom screen">{bottom}</section>
     </div>
   );

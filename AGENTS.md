@@ -10,6 +10,9 @@ answers and votes can be crowdsourced per case. Three kinds ("families", `lib/fa
 - **logic** — conditions decide an outcome (truth table).
 - **numeric** — a calculation over one real input (price, fee, rounding, duration...), sampled by running Python.
 - **visual** — how a small screen looks before/after in 3-4 situations, described as shapes and drawn by our `MockScreen`.
+- **mixed** — when Gemini Decisions says a PR clearly fits two kinds (`secondFamily`: both fits ≥ 0.3), both are modelled in
+  parallel (no extra wait; if the second fails the puzzle stays single-kind). `families` lists both; their data, rules
+  (`mixedRules`, up to 3 lines each) and steps (`interleaveRounds`, max 5) are combined. Badge: e.g. MATH + LAYOUT.
 
 Two mascots star in everything:
 - **Green** = code the PR **added**.
@@ -26,14 +29,17 @@ Everything that can run in parallel does:
    has a burst limit; REST fallback) for recent merged, **review-approved** PRs **made with AI
    coding tools**, found by each tool's own signature (Claude Code footer, Copilot / Devin / Jules agent authors, Codex task
    links, Cursor footer); every result is re-checked with `madeWithTool` before loading and dropped without a real signature
-   (search matches loosely). GraphQL returns each repo's stars, so repos with `MIN_STARS` (50) or more go first and
+   (search matches loosely). Every search is newest-first (`sort:updated-desc`: without it GitHub returns "best match",
+   which barely changes) inside a random merge window (`mergedWindow`: last 3 days / 3-14 days / 2-8 weeks), and PRs that
+   already have a puzzle are skipped (existing puzzles are read while GitHub is searched). Repos in the 12 most recent
+   puzzles score 15% lower, so one busy repo doesn't keep winning. GraphQL returns each repo's stars, so repos with `MIN_STARS` (50) or more go first and
    smaller ones only fill gaps (review:approved lifts the 50+ star share from ~5% to ~30%). Dependency bots and chore PRs filtered out; ~70 loaded with diffs, 12 at a time (`settleLimited`,
    `lib/limit.ts`; ~140 GitHub calls of the 5,000/hour budget), top 50 by a branching-logic heuristic (no surrounding code yet). A pasted PR URL skips this. (~8s)
 2. **Rank with the Gemini Decisions API** (`gemini-decision-1`, `POST /v1beta/decisions`, `decide()` in `lib/gemini.ts`): one call
    per candidate, 10 at a time, asking calibrated rubric/yes-no questions (logic, small & self-contained, relatable, plain,
    noise, crypto: a small hit of up to -15% so star-rich crypto repos don't crowd the picks) plus which kind of puzzle it makes (`kind`: logic / numeric / visual / none). Combined into a 0–1 score.
    Popularity only nudges the score (log stars, at most +10%), and `chooseCandidate` takes a well-known repo only when it's
-   within 15% of the best fit. It aims for a random kind (`FAMILY_WEIGHTS` 40/30/30; `PUZZLE_FAMILY` env forces one for tests) and takes
+   within 15% of the best fit. It aims for a random kind (`FAMILY_WEIGHTS` 40/30/30, leaning toward kinds rare in the last 12 puzzles via `familyWeights`; `PUZZLE_FAMILY` env forces one for tests) and takes
    the best PR that clearly fits it, else the best PR overall as its own kind. Falls back to the heuristic order if the API fails. (a few seconds for 50)
 3. **In parallel from here:** `designFlair` (`gemini-4-hydrogen`, low thinking) writes the project's music line (lead
    instrument and sounds, ≤40 words), picks a tempo that fits the project (76–132 BPM, saved as `bpm`) and two **props** built from PS1 primitives (`PropSpec`: box/cylinder/sphere/cone/torus parts,
@@ -92,6 +98,10 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
   for `who`) above a case box tagged THE CASE. If a step would overflow, PlayDS adds `.dense` (tighter padding), then `.no-rules`
   (the bubble becomes a one-line "tap to read" strip), then `.denser` (drops the strip and `.can-hide`, e.g. one spare pattern row).
   `/play/{id}?round=N` jumps to step N; `&qa` logs whether the step overflows (`&qa=answer` also auto-answers).
+- Kind badges (`components/KindBadge.tsx`, `FAMILY_BADGES`): LOGIC / MATH / LAYOUT (mixed: both) on the menu and PR card.
+- Generation runs under `after()` in `POST /api/puzzles`, so leaving the page doesn't stop it; `lib/jobs.ts` keeps a
+  `jobs/{id}.json` marker while it runs, shown in the menu as "Being made…" with a "Bored of waiting?" hint (the list
+  refreshes every 10s until it lands).
 - Numeric steps (`components/Families.tsx`): `num-predict` (key Green's/Red's result into a Brain Age style `Keypad`),
   `num-diff` (how much more Green gives), `num-split` / `num-reach` (drag a marker along the `NumberLine` pixel chart: where
   Green starts to differ, where it first hits a target; Green's line appears after answering).
@@ -123,9 +133,12 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
 - Screens: top 4:3, bottom 25:23, fixed; on desktop the handheld is sized from the window height so the page never scrolls; on
   phones it is exactly one viewport. Puzzle steps never scroll; info panels (intro, rules, end, home menu) may.
 - `app/globals.css` — all tokens and components (pixel buttons, controls, cases, dialogue, code). Font: DotGothic16, only at
-  16/32/48px so every dot is a whole pixel (no letter-spacing, no synthetic bold). Colour rule: green and red ONLY mean Green
+  16/32/48px so every dot is a whole pixel (no letter-spacing, no synthetic bold). Exception: the "PR BOY DS" model name on
+  the hinge is printed hardware lettering, a small system sans (`.ds-label`). Colour rule: green and red ONLY mean Green
   (new code / added lines) and Red (old code / removed lines); feedback and actions use yellow, ink and greys.
-  On phones the shell disappears and the two screens fill the viewport.
+  On phones the shell disappears and the two screens fill the viewport. Page background: Green's side to Red's side through
+  black (left green, right red), with the menu's grid laid over it. Pixel buttons pad their label up by the 4px darker
+  bottom edge so it sits centred on the face (bar buttons have no edge and stay even).
 - Motion (`app/globals.css`, "Motion" block): short stepped animations (steps rise in part by part, answer cards deal in,
   right pops, wrong shakes, Red/Green results slide in from their sides, the "Why?" lines appear in order, sheets slide up,
   the menu deals in). Off under prefers-reduced-motion. Step fit is measured from layout offsets (`contentBottom`), never
@@ -150,7 +163,7 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
 
 - Keep `GEMINI_KEY`, `GITHUB_TOKEN`, `BLOB_READ_WRITE_TOKEN`, `CONTEXT_DEV_KEY` server-side.
 - Gemini only fills data (`lib/types.ts`). New visuals or mechanics are added as our own components, not generated code.
-- Keep every puzzle about ONE small decision so votes map to concrete cases.
+- Keep every puzzle about ONE change (at most two aspects of it, for mixed puzzles) so votes map to concrete cases.
 - Keep a link to the real PR on every puzzle. Only say a PR was made with an AI tool when its own signature says so
   (`pr.madeWith`, from `madeWithTool`); never guess from style.
 - Generation costs money (Gemini + Lyria + Omni video ≈$0.35). Never backfill cutscenes for older puzzles. Discuss before adding auto-generation or crawlers.

@@ -17,6 +17,7 @@ export const TUTORIAL: TutorialLine[] = [
   { who: "add", text: "Then you use our rules to work out what we do, in a few quick puzzles.", item: 1 },
   { who: "del", text: "After each one, vote: is Green's new way right? Your votes help people judge the change.", item: 2 },
   { who: "add", text: "Or press + New puzzle: we grab a real, recent pull request made with an AI coding tool and puzzle it up.", item: 3 },
+  { who: "del", text: "Got one of your own? Tap PR link and paste any public pull request. We'll puzzle that instead.", item: 3 },
   { who: "narrator", text: "Pick a puzzle below to start!" },
 ];
 
@@ -24,7 +25,7 @@ const STEPS = [
   "Meet the change: a short movie, then Red's old rules and Green's new rules.",
   "Solve 3 to 5 quick puzzles with those rules. Stuck? The Rules button has them.",
   "Vote after each one: is Green's way right for that case?",
-  "Make your own: + New puzzle turns a real, recent AI-made pull request into a new puzzle.",
+  "Make your own: + New puzzle turns a real, recent AI-made pull request into a new puzzle, or paste your own with PR link.",
 ];
 
 /** The How to play card on the landing page: who's who, and the steps (the one being explained lights up). */

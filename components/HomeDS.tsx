@@ -7,11 +7,13 @@ import type { MascotKind } from "@/lib/mascot";
 import { audioLog, audioState, playLoop, sfx, unlockAudio } from "@/lib/sound";
 import type { PropSpec, Puzzle, StageCard } from "@/lib/types";
 import { DSShell, TextBox, type Line } from "./DS";
+import type { Job } from "@/lib/jobs";
+import { KindBadge } from "./KindBadge";
 import { Logo } from "./Logo";
 import { HowToPlay, TUTORIAL, TUTORIAL_KEY, type TutorialLine } from "./HowToPlay";
 import { PS1Stage, type StageState } from "./PS1Stage";
 
-type Summary = Pick<Puzzle, "id" | "title" | "pr" | "component" | "musicFile" | "bpm">;
+type Summary = Pick<Puzzle, "id" | "title" | "pr" | "component" | "musicFile" | "bpm" | "family" | "families">;
 type Progress = {
   type: "stage";
   stage: "fetch" | "rank" | "pick" | "model" | "music" | "fmv" | "world" | "save";
@@ -59,6 +61,7 @@ const INTRO: Line[] = [
   { who: "add", text: "I'm Green. Every line a pull request adds? That's me." },
   { who: "del", text: "I'm Red. Every line it deletes. Somebody has to." },
   { who: "add", text: "Real code changes from out in the world. Tiny brain teasers. Pick one below!" },
+  { who: "del", text: "Got a pull request of your own in mind? Tap PR link, paste it, and we'll puzzle that one up instead." },
 ];
 
 /**
@@ -105,6 +108,7 @@ function banter(family?: Progress["family"]): Line[] {
 /** What the two say while a puzzle is being made. */
 function progressLine(event: Progress): Line | null {
   if (event.stage === "fetch" && event.status === "active") return { who: "del", text: "Grabbing fifty fresh pull requests made with AI coding tools..." };
+  if (event.stage === "fetch" && event.status === "done" && event.detail === "already made") return { who: "add", text: "That one's already a puzzle! Taking you there." };
   if (event.stage === "fetch" && event.status === "done") return { who: "add", text: `Got ${event.detail}. Let's see which one's the juiciest.` };
   if (event.stage === "rank" && event.status === "active") return { who: "del", text: "Gemini Decisions is scoring every one. Logic, size, who'd notice..." };
   if (event.stage === "model" && event.status === "active") return { who: "del", text: "Now running the old me and the new Green side by side. Every case." };
@@ -115,7 +119,7 @@ function progressLine(event: Progress): Line | null {
   return null;
 }
 
-export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
+export function HomeDS({ puzzles, jobs = [] }: { puzzles: Summary[]; jobs?: Job[] }) {
   const router = useRouter();
   const stage = useRef<StageState>({ add: "dance", del: "dance", bpm: 96, show: { mode: "idle", cards: [], picked: null, headline: "", beat: false } });
   const [lines, setLines] = useState<Line[]>(INTRO);
@@ -297,6 +301,13 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
     };
   }, [puzzles]);
 
+  // While puzzles are being made in the background, refresh the list now and then so the new one appears by itself.
+  useEffect(() => {
+    if (!jobs.length || busy) return;
+    const timer = window.setInterval(() => router.refresh(), 10_000);
+    return () => window.clearInterval(timer);
+  }, [jobs.length, busy, router]);
+
   // /?demo plays the whole generation show with sample data, so it can be previewed for free.
   useEffect(() => {
     if (!new URLSearchParams(window.location.search).has("demo")) return;
@@ -335,7 +346,8 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
   /** Drives the top-screen show from the server's progress events. */
   function direct(event: Progress) {
     const show = stage.current.show!;
-    if (event.stage === "fetch" && event.status === "done") stage.current.show = { ...show, mode: "fetching", headline: `${event.detail?.toUpperCase() ?? ""} FOUND` };
+    if (event.stage === "fetch" && event.status === "done" && event.detail === "already made") stage.current.show = { ...show, headline: "ALREADY MADE" };
+    else if (event.stage === "fetch" && event.status === "done") stage.current.show = { ...show, mode: "fetching", headline: `${event.detail?.toUpperCase() ?? ""} FOUND` };
     else if (event.stage === "rank" && event.status === "done" && event.cards) {
       // The top five drop in with their scores and hop while it's read out; then a drawn-out reveal (Gemini Decisions is
       // too quick to follow). The winner hops onto the stage exactly when it's named, then the modelling show starts.
@@ -377,7 +389,8 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
       const response = await fetch("/api/puzzles", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prUrl: prUrl.trim() || undefined }),
+        // Only when the PR link field is open: a link left in a hidden field must not hijack "+ New puzzle".
+        body: JSON.stringify({ prUrl: (showUrl && prUrl.trim()) || undefined }),
       });
       if (!response.body) throw new Error("No response from the server.");
       const reader = response.body.getReader();
@@ -479,19 +492,37 @@ export function HomeDS({ puzzles }: { puzzles: Summary[] }) {
           </div>
           {showUrl && (
             <label className="url-field">
-              <span>Paste a GitHub pull request</span>
+              <span>Paste a GitHub pull request (or an issue that links to one)</span>
               <input value={prUrl} onChange={(event) => setPrUrl(event.target.value)} placeholder="https://github.com/owner/repo/pull/123" inputMode="url" disabled={busy} />
             </label>
           )}
           {error && <p className="menu-error" role="alert">{error}</p>}
 
+          {(busy || jobs.length > 0) && (
+            <p className="menu-wait">Bored of waiting? Play one of the ones already made. The new one keeps cooking and pops up here.</p>
+          )}
           <ul className="menu-list">
+            {jobs.map((job) => (
+              <li key={job.id}>
+                <span className="menu-item menu-cooking" aria-live="polite">
+                  <span className="menu-arrow menu-spinner" aria-hidden>
+                    ◐
+                  </span>
+                  <span className="menu-text">
+                    <strong>Being made…</strong>
+                    <small>{job.repository ? `${job.repository} · ${job.title ?? ""}` : "Finding a pull request"}</small>
+                  </span>
+                </span>
+              </li>
+            ))}
             {puzzles.map((puzzle) => (
               <li key={puzzle.id}>
                 <Link href={`/play/${puzzle.id}`} className="menu-item" onClick={() => sfx.select()}>
                   <span className="menu-arrow" aria-hidden>▶</span>
                   <span className="menu-text">
-                    <strong>{puzzle.title}</strong>
+                    <strong>
+                      <KindBadge family={puzzle.family} families={puzzle.families} /> {puzzle.title}
+                    </strong>
                     <small>
                       {puzzle.pr.repository} · {puzzle.component.name}
                     </small>

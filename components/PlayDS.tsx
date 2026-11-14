@@ -6,6 +6,7 @@ import type { MascotKind, MascotMood } from "@/lib/mascot";
 import { playLoop, setMuted, sfx } from "@/lib/sound";
 import { caseLabel, formatNumber, numericRow, outcome, pointAt, roundTo, storyOf, valueLabel, visualRow, voteRow, type Puzzle, type PuzzleRow, type Round, type VoteTally } from "@/lib/types";
 import { Fmv } from "./Fmv";
+import { KindBadge } from "./KindBadge";
 import { starCount, WorldCard } from "./World";
 import { Keypad, NumberCase, NumberLine, NumberResults, VisualSpot, VisualWhich } from "./Families";
 import { DSShell, TextBox, type Line } from "./DS";
@@ -550,7 +551,7 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
             <div className="panel panel-info">
               <a className="pr-card" href={puzzle.pr.url} target="_blank" rel="noreferrer">
                 <span className="pr-repo">
-                  {puzzle.pr.repository} #{puzzle.pr.number}
+                  <KindBadge family={puzzle.family} families={puzzle.families} /> {puzzle.pr.repository} #{puzzle.pr.number}
                   {puzzle.pr.stars ? ` · ★ ${starCount(puzzle.pr.stars)}` : ""}
                 </span>
                 <strong>{puzzle.pr.title}</strong>
@@ -687,9 +688,21 @@ export function PlayDS({ puzzle, initialVotes }: { puzzle: Puzzle; initialVotes:
 
           {phase.kind === "end" && (
             <div className="panel panel-info end">
-              <p className="score">
-                <strong>{score}</strong> / {results.length}
-              </p>
+              <div className="score-card">
+                <span className="score-label">YOUR SCORE</span>
+                <p className="score">
+                  <strong>{score}</strong>
+                  <span> / {results.length}</span>
+                </p>
+                <span className="score-pips" aria-hidden>
+                  {results.map((right, index) => (
+                    <i key={index} className={right ? "pip-right" : "pip-wrong"} />
+                  ))}
+                </span>
+                <span className="score-note">
+                  {results.length && score === results.length ? "Perfect run!" : score >= results.length * 0.6 ? "Sharp reasoning." : "Tricky one. The rules are worth a second look."}
+                </span>
+              </div>
               {flagged.length > 0 && (
                 <div className="flags">
                   <p className="flags-title">Where players doubt Green</p>

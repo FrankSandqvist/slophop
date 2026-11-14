@@ -1,7 +1,7 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
 import { MODELS, decide, generateJson, generateMusic, generateVideo, type DecisionQuestion } from "./gemini";
-import { addContext, findCandidatePullRequests, getPullRequest, type PullRequestSource } from "./github";
+import { addContext, findCandidatePullRequests, getPullRequest, prKey, type PullRequestSource } from "./github";
 import {
   buildNumericRounds,
   buildVisualRounds,
@@ -16,6 +16,7 @@ import {
   type VisualDesign,
 } from "./families";
 import { explainRounds } from "./explain";
+import { clearJob, saveJob } from "./jobs";
 import { researchWorld } from "./world";
 import { settleLimited } from "./limit";
 import { mascotReferences } from "./sprites";
@@ -126,13 +127,45 @@ const FAMILY_WEIGHTS: Fit = { logic: 0.4, numeric: 0.3, visual: 0.3 };
  * Aims for a random kind of puzzle and takes the best PR that fits it (a clear fit, and not much worse than the best PR).
  * Falls back to the best PR overall, as whatever kind it fits best.
  */
-function chooseCandidate(ranked: Array<{ score: number | null; fit: Fit | null; pr: { stars: number | null } }>): { index: number; family: PuzzleFamily } {
+/**
+ * A second kind when the chosen PR clearly fits two (e.g. a calculation that changes what's visible): the puzzle becomes
+ * mixed. Both fits must be solid; logic only pairs when its fit is strong too.
+ */
+function secondFamily(fit: Fit | null, primary: PuzzleFamily): PuzzleFamily | undefined {
+  if (!fit || fit[primary] < 0.3) return undefined;
+  const other = (Object.keys(fit) as PuzzleFamily[]).filter((family) => family !== primary).sort((a, b) => fit[b] - fit[a])[0];
+  return other && fit[other] >= 0.3 ? other : undefined;
+}
+
+/**
+ * The odds of aiming for each kind, leaning toward kinds that have been rare in recent puzzles (mixed ones count for
+ * both): base weight × sqrt(intended share / recent share), so the lean is gentle. E.g. 6 logic, 5 maths, 1 layout
+ * moves 40/30/30 to roughly 30/21/49.
+ */
+function familyWeights(recent: PuzzleFamily[]): Fit {
+  if (!recent.length) return FAMILY_WEIGHTS;
+  const families = Object.keys(FAMILY_WEIGHTS) as PuzzleFamily[];
+  const raw = Object.fromEntries(
+    families.map((family) => {
+      const share = recent.filter((kind) => kind === family).length / recent.length;
+      return [family, FAMILY_WEIGHTS[family] * Math.sqrt(FAMILY_WEIGHTS[family] / Math.max(share, 0.05))];
+    }),
+  ) as Fit;
+  const total = families.reduce((sum, family) => sum + raw[family], 0);
+  return Object.fromEntries(families.map((family) => [family, raw[family] / total])) as Fit;
+}
+
+function chooseCandidate(
+  ranked: Array<{ score: number | null; fit: Fit | null; pr: { stars: number | null } }>,
+  recent: PuzzleFamily[] = [],
+): { index: number; family: PuzzleFamily; second?: PuzzleFamily } {
   const best = ranked[0]?.score;
   if (best === null || best === undefined) return { index: 0, family: "logic" };
   let roll = Math.random();
   // PUZZLE_FAMILY=numeric|visual|logic forces the aim (testing); otherwise it's drawn by FAMILY_WEIGHTS.
   const forced = process.env.PUZZLE_FAMILY as PuzzleFamily | undefined;
-  const target = forced && forced in FAMILY_WEIGHTS ? forced : ((Object.keys(FAMILY_WEIGHTS) as PuzzleFamily[]).find((family) => (roll -= FAMILY_WEIGHTS[family]) < 0) ?? "logic");
+  const weights = familyWeights(recent);
+  const target = forced && forced in FAMILY_WEIGHTS ? forced : ((Object.keys(weights) as PuzzleFamily[]).find((family) => (roll -= weights[family]) < 0) ?? "logic");
   // The best fit for the kind; a well-known repo (players may know it) wins only if it's nearly as good (within 15%).
   const value = (entry: (typeof ranked)[number]) => {
     const fit = entry.fit?.[target] ?? 0;
@@ -142,11 +175,12 @@ function chooseCandidate(ranked: Array<{ score: number | null; fit: Fit | null; 
   if (top > 0) {
     const known = ranked.findIndex((entry) => (entry.pr.stars ?? 0) >= KNOWN_STARS && value(entry) >= top * 0.85);
     const index = known >= 0 ? known : ranked.findIndex((entry) => value(entry) === top);
-    return { index, family: target };
+    return { index, family: target, second: secondFamily(ranked[index]?.fit ?? null, target) };
   }
   const fit = ranked[0].fit;
   const family = fit ? (Object.keys(fit) as PuzzleFamily[]).sort((a, b) => fit[b] - fit[a])[0] : "logic";
-  return { index: 0, family: fit && fit[family] > 0.3 ? family : "logic" };
+  const primary = fit && fit[family] > 0.3 ? family : "logic";
+  return { index: 0, family: primary, second: secondFamily(fit, primary) };
 }
 
 /** Scores every candidate in parallel and returns them best first (falls back to the GitHub heuristic order). */
@@ -760,7 +794,7 @@ const HEDGE_MS = Number(process.env.MODEL_HEDGE_MS || 40_000);
  * Code-execution turns vary a lot in length. Start the primary model; if it hasn't answered after HEDGE_MS (or fails),
  * start a fast backup in parallel and take the first VALID answer. The loser is aborted (we stop polling it).
  */
-type Modelled =
+export type Modelled =
   | { family: "logic"; inputs: PuzzleInput[]; outcomes: PuzzleOutcome[]; table: PuzzleRow[] }
   | { family: "numeric"; numeric: NumericModel }
   | { family: "visual"; visual: VisualModel };
@@ -772,7 +806,7 @@ const DESIGNS: Record<PuzzleFamily, { prompt: (pr: PullRequestSource) => string;
   visual: { prompt: visualPrompt, schema: visualSchema, python: false, check: (data: VisualDesign) => ({ family: "visual", visual: validateVisual(data) }) },
 };
 
-async function modelHedged(pr: PullRequestSource, family: PuzzleFamily, signal?: AbortSignal) {
+export async function modelHedged(pr: PullRequestSource, family: PuzzleFamily, signal?: AbortSignal) {
   const design = DESIGNS[family];
   const prompt = design.prompt(pr);
   const controllers: AbortController[] = [];
@@ -831,22 +865,54 @@ function stageCard(pr: PullRequestSource): StageCard {
   };
 }
 
+/** Fetch-done detail when a pasted PR already has a puzzle (the client says so and opens it). */
+export const ALREADY_MADE = "already made";
+
 const newId = () => `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
 
 export async function createPuzzle(options: { prUrl?: string; emit: (event: ProgressEvent) => void; signal?: AbortSignal }) {
-  const { emit, signal } = options;
   const id = newId();
+  const startedAt = new Date().toISOString();
+  await saveJob({ id, startedAt });
+  try {
+    return await makePuzzle(id, startedAt, options);
+  } finally {
+    await clearJob(id);
+  }
+}
+
+async function makePuzzle(id: string, startedAt: string, options: { prUrl?: string; emit: (event: ProgressEvent) => void; signal?: AbortSignal }) {
+  const { emit, signal } = options;
 
   emit({ type: "stage", stage: "fetch", status: "active" });
-  const candidates = options.prUrl ? [await getPullRequest(options.prUrl)] : await findCandidatePullRequests(CANDIDATES);
+  // Existing puzzles (read while GitHub is searched): their PRs are skipped, and their repos get a small ranking hit.
+  const existing = listPuzzles(200).catch(() => [] as Puzzle[]);
+  const candidates = options.prUrl
+    ? [await getPullRequest(options.prUrl)]
+    : await findCandidatePullRequests(CANDIDATES, existing.then((puzzles) => new Set(puzzles.map((puzzle) => prKey(puzzle.pr.url)))));
+  // A pasted PR (or issue) that already has a puzzle: no new one, the player is sent to the existing game.
+  if (options.prUrl) {
+    const made = (await existing).find((puzzle) => prKey(puzzle.pr.url) === prKey(candidates[0].url));
+    if (made) {
+      emit({ type: "stage", stage: "fetch", status: "done", detail: ALREADY_MADE });
+      return made;
+    }
+  }
   emit({ type: "stage", stage: "fetch", status: "done", detail: `${candidates.length} pull request${candidates.length === 1 ? "" : "s"}` });
 
   // Step 1: Gemini Decisions scores every candidate; the best one wins.
   emit({ type: "stage", stage: "rank", status: "active", detail: `Scoring ${candidates.length} with Gemini Decisions` });
-  const scored = await rankCandidates(candidates, signal);
+  const recentRepos = new Set((await existing).slice(0, 12).map((puzzle) => puzzle.pr.repository.toLowerCase()));
+  // A repo that's in the recent puzzles scores 15% lower, so one busy repo doesn't keep winning with different PRs.
+  const scored = (await rankCandidates(candidates, signal))
+    .map((entry) => (entry.score !== null && recentRepos.has(entry.pr.repository.toLowerCase()) ? { ...entry, score: entry.score * 0.85 } : entry))
+    .sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || a.order - b.order);
   // Aim for a kind of puzzle (variety) and put the PR chosen for it first: everything below uses ranked[0].
-  const chosen = chooseCandidate(scored);
+  // Lean toward the kinds that have been rare in the last 12 puzzles.
+  const recentFamilies = (await existing).slice(0, 12).flatMap((puzzle) => puzzle.families ?? [puzzle.family ?? "logic"]);
+  const chosen = chooseCandidate(scored, recentFamilies);
   const ranked = [scored[chosen.index], ...scored.filter((_, index) => index !== chosen.index)];
+  void saveJob({ id, startedAt, repository: ranked[0].pr.repository, title: ranked[0].pr.title });
   const top = ranked.slice(0, 5);
   emit({
     type: "stage",
@@ -917,12 +983,21 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
   // Step 2: model that one piece with code execution, on the chosen PR only (hedged against slow runs).
   emit({ type: "stage", stage: "model", status: "active" });
   // A numbers or looks design that doesn't hold up falls back to a logic puzzle of the same PR.
+  // Mixed puzzles model their second kind at the same time (no extra wait); if it fails, the puzzle stays single-kind.
+  const secondTask = chosen.second
+    ? modelHedged(pr, chosen.second, signal).catch((error: unknown) => {
+        console.warn(`The second (${chosen.second}) design failed; the puzzle stays single-kind`, error);
+        return null;
+      })
+    : Promise.resolve(null);
   const modelled = await modelHedged(pr, chosen.family, signal).catch((error: unknown) => {
     if (chosen.family === "logic") throw error;
     console.warn(`The ${chosen.family} design failed; falling back to logic`, error);
     return modelHedged(pr, "logic", signal);
   });
   const { data, model, result } = modelled;
+  const secondModel = await secondTask;
+  const second = secondModel && secondModel.result.family !== result.family ? secondModel : null;
   const detail =
     result.family === "logic"
       ? `${result.table.length} cases · ${result.table.filter((row) => row.old !== row.new).length} changed`
@@ -932,24 +1007,9 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
   emit({ type: "stage", stage: "model", status: "done", detail });
 
   // Rounds come from our code; the case explainers (one Gemini call) run while the music and cutscene finish.
-  const rules = {
-    old: (data.rules?.old ?? []).slice(0, 4).map((line) => String(line).slice(0, 140)),
-    new: (data.rules?.new ?? []).slice(0, 4).map((line) => String(line).slice(0, 140)),
-  };
-  const family = {
-    family: result.family,
-    inputs: result.family === "logic" ? result.inputs : [],
-    outcomes: result.family === "logic" ? result.outcomes : [],
-    table: result.family === "logic" ? result.table : [],
-    ...(result.family === "numeric" ? { numeric: result.numeric } : {}),
-    ...(result.family === "visual" ? { visual: result.visual } : {}),
-  };
-  const rounds =
-    result.family === "logic"
-      ? buildRounds(result.table, result.outcomes, result.inputs)
-      : result.family === "numeric"
-        ? buildNumericRounds(result.numeric)
-        : buildVisualRounds(result.visual);
+  const rules = mixedRules(data.rules, second?.data.rules);
+  const family = composeFamilies(result, second?.result);
+  const rounds = composeRounds(result, second?.result);
   const explainTask = explainRounds({ ...family, project: String(data.project ?? ""), change: String(data.change ?? ""), scenario: String(data.scenario ?? ""), rules, rounds }, signal).catch(
     (error: unknown) => {
       console.error("Case explainers failed", error);
@@ -989,6 +1049,56 @@ export async function createPuzzle(options: { prUrl?: string; emit: (event: Prog
   await saveFile(`puzzles/${id}/meta.json`, JSON.stringify(puzzle, null, 2), "application/json");
   emit({ type: "stage", stage: "save", status: "done" });
   return puzzle;
+}
+
+/* ---------- Mixed puzzles: two kinds of the same change in one puzzle ---------- */
+
+/** The family fields of a puzzle from one or two modelled kinds (primary first). */
+export function composeFamilies(primary: Modelled, extra?: Modelled | null) {
+  const parts = [primary, ...(extra ? [extra] : [])];
+  const logic = parts.find((part) => part.family === "logic");
+  const numeric = parts.find((part) => part.family === "numeric");
+  const visual = parts.find((part) => part.family === "visual");
+  return {
+    family: primary.family,
+    ...(extra ? { families: parts.map((part) => part.family) } : {}),
+    inputs: logic?.family === "logic" ? logic.inputs : [],
+    outcomes: logic?.family === "logic" ? logic.outcomes : [],
+    table: logic?.family === "logic" ? logic.table : [],
+    ...(numeric?.family === "numeric" ? { numeric: numeric.numeric } : {}),
+    ...(visual?.family === "visual" ? { visual: visual.visual } : {}),
+  };
+}
+
+function roundsOf(part: Modelled): Round[] {
+  return part.family === "logic"
+    ? buildRounds(part.table, part.outcomes, part.inputs)
+    : part.family === "numeric"
+      ? buildNumericRounds(part.numeric)
+      : buildVisualRounds(part.visual);
+}
+
+/** Steps for one kind, or both kinds interleaved (primary first), at most 5 in all. */
+export function composeRounds(primary: Modelled, extra?: Modelled | null): Round[] {
+  return extra ? interleaveRounds(roundsOf(primary), roundsOf(extra)) : roundsOf(primary);
+}
+
+export function interleaveRounds(a: Round[], b: Round[], max = 5): Round[] {
+  const out: Round[] = [];
+  for (let i = 0; out.length < max && (i < a.length || i < b.length); i++) {
+    if (i < a.length) out.push(a[i]);
+    if (i < b.length && out.length < max) out.push(b[i]);
+  }
+  return out;
+}
+
+/** One rulebook from both kinds' rules: up to 3 lines each, duplicates dropped. */
+export function mixedRules(first: { old?: string[]; new?: string[] } | undefined, extra?: { old?: string[]; new?: string[] } | null) {
+  const pick = (a: string[] = [], b: string[] = []) =>
+    [...a.slice(0, extra ? 3 : 4), ...(extra ? b.slice(0, 3) : [])]
+      .map((line) => String(line).slice(0, 140))
+      .filter((line, index, all) => all.indexOf(line) === index);
+  return { old: pick(first?.old, extra?.old), new: pick(first?.new, extra?.new) };
 }
 
 /* ---------- Reading ---------- */

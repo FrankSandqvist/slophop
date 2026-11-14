@@ -81,6 +81,9 @@ export type Explainer = { red: string; green: string; why: string };
 /** What a puzzle is about: a decision (logic), a calculation (numeric) or how something looks (visual). */
 export type PuzzleFamily = "logic" | "numeric" | "visual";
 
+/** The kind badge shown on puzzles: LOGIC, MATH or LAYOUT. Older puzzles without a family are logic. */
+export const FAMILY_BADGES: Record<PuzzleFamily, string> = { logic: "LOGIC", numeric: "MATH", visual: "LAYOUT" };
+
 /** Numbers: Red's and Green's calculation over one real input, sampled by Gemini running Python. */
 export type NumericModel = {
   input: { label: string; unit: string; explain: string; min: number; max: number; step: number };
@@ -119,6 +122,8 @@ export type Puzzle = {
   lines: { add: string; del: string };
   /** Missing on older puzzles: logic. */
   family?: PuzzleFamily;
+  /** Mixed puzzles: both kinds, primary first (e.g. ["numeric", "visual"]); their data and steps are both present. */
+  families?: PuzzleFamily[];
   /** Logic puzzles: conditions, outcomes and the full truth table. Empty for the other families. */
   inputs: PuzzleInput[];
   outcomes: PuzzleOutcome[];

@@ -243,9 +243,51 @@ async function toSource(loaded: LoadedPull, withContext = true): Promise<PullReq
   };
 }
 
+/**
+ * A pasted issue link resolves to its pull request: the issue number itself when it is a PR (GitHub numbers both the
+ * same way), else the PR linked to it (closing references first, then PRs that mention it), preferring merged ones.
+ */
+async function resolveIssue(owner: string, repo: string, number: number) {
+  const issue = await gh<{ pull_request?: unknown }>(`/repos/${owner}/${repo}/issues/${number}`);
+  if (issue.pull_request) return { owner, repo, number };
+  type Linked = { url: string; merged: boolean; state: string };
+  const linked: Linked[] = [];
+  if (process.env.GITHUB_TOKEN) {
+    const response = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { ...headers(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: `query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { issue(number: $number) {
+          closedByPullRequestsReferences(first: 10, includeClosedPrs: true) { nodes { url merged state } } } } }`,
+        variables: { owner, repo, number },
+      }),
+      cache: "no-store",
+    }).catch(() => null);
+    const json = (await response?.json().catch(() => null)) as { data?: { repository?: { issue?: { closedByPullRequestsReferences?: { nodes?: Linked[] } } } } } | null;
+    linked.push(...(json?.data?.repository?.issue?.closedByPullRequestsReferences?.nodes ?? []));
+  }
+  if (!linked.length) {
+    // PRs that mention the issue (the issue's timeline "cross-referenced" events).
+    const timeline = await gh<Array<{ event?: string; source?: { issue?: { html_url?: string; state?: string; pull_request?: { merged_at?: string | null } } } }>>(
+      `/repos/${owner}/${repo}/issues/${number}/timeline?per_page=100`,
+    ).catch(() => []);
+    for (const entry of timeline) {
+      const source = entry.source?.issue;
+      if (entry.event === "cross-referenced" && source?.pull_request && source.html_url) {
+        linked.push({ url: source.html_url, merged: Boolean(source.pull_request.merged_at), state: source.state ?? "" });
+      }
+    }
+  }
+  const best = [...linked].sort((a, b) => Number(b.merged) - Number(a.merged) || Number(b.state === "OPEN" || b.state === "open") - Number(a.state === "OPEN" || a.state === "open"))[0];
+  const parsed = best ? parsePullUrl(best.url) : null;
+  if (!parsed) throw new Error("That issue isn't linked to a pull request yet.");
+  return parsed;
+}
+
 export async function getPullRequest(url: string): Promise<PullRequestSource> {
-  const parsed = parsePullUrl(url);
-  if (!parsed) throw new Error("That doesn't look like a GitHub pull request URL.");
+  const issue = url.trim().match(/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)/i);
+  const parsed = parsePullUrl(url) ?? (issue ? await resolveIssue(issue[1], issue[2], Number(issue[3])) : null);
+  if (!parsed) throw new Error("That doesn't look like a GitHub pull request (or issue) URL.");
   const loaded = await loadPull(parsed.owner, parsed.repo, parsed.number);
   if (!buildDiff(loaded.files)) throw new Error("That PR has no readable code changes to turn into a puzzle.");
   return toSource(loaded);
@@ -296,13 +338,34 @@ async function searchPulls(query: string): Promise<SearchItem[]> {
   return (await gh<{ items: SearchItem[] }>(`/search/issues?q=${encodeURIComponent(query)}&sort=updated&order=desc&per_page=100&page=${1 + Math.floor(Math.random() * 2)}`)).items;
 }
 
-export async function findCandidatePullRequests(count = 50): Promise<PullRequestSource[]> {
+/** A random recent merge window, so runs don't all draw the same newest batch (narrow searches reach weeks back). */
+function mergedWindow() {
+  const day = 24 * 60 * 60 * 1000;
+  const date = (daysAgo: number) => new Date(Date.now() - daysAgo * day).toISOString().slice(0, 10);
+  const roll = Math.random();
+  if (roll < 0.5) return `merged:>${date(3)}`;
+  if (roll < 0.8) return `merged:${date(14)}..${date(3)}`;
+  return `merged:${date(56)}..${date(14)}`;
+}
+
+/** Same PR URL regardless of case or a trailing slash. */
+export const prKey = (url: string) => url.toLowerCase().replace(/\/+$/, "");
+
+/**
+ * `exclude`: PR URLs that already have a puzzle (resolved while the searches run, so it costs no time); they're dropped
+ * before loading.
+ */
+export async function findCandidatePullRequests(count = 50, exclude: Promise<Set<string>> = Promise.resolve(new Set())): Promise<PullRequestSource[]> {
   // Four searches of 100, at most two at a time: GitHub's search API has a burst ("secondary") limit that parallel
   // searches trip easily. Two general searches plus one aimed at numbers and one at looks, so every kind has candidates.
   // All require an approved review: that lands in real team projects (~30% with 50+ stars vs ~5% without).
   const shuffled = (list: string[]) => [...list].sort(() => Math.random() - 0.5);
-  const queries = [...shuffled(SEARCHES.general).slice(0, 2), shuffled(SEARCHES.numeric)[0], shuffled(SEARCHES.visual)[0]].map((query) => `${query} review:approved`);
+  // Newest first (sort:updated-desc; without it GitHub returns "best match", which barely changes), each in a random window.
+  const queries = [...shuffled(SEARCHES.general).slice(0, 2), shuffled(SEARCHES.numeric)[0], shuffled(SEARCHES.visual)[0]].map(
+    (query) => `${query} review:approved ${mergedWindow()} sort:updated-desc`,
+  );
   const searched = await settleLimited(queries, 2, searchPulls);
+  const done = await exclude.catch(() => new Set<string>());
   if (searched.every((result) => result.status === "rejected")) {
     throw new Error("GitHub asked us to slow down for a few minutes. Try again soon, or paste a PR link.");
   }
@@ -314,6 +377,7 @@ export async function findCandidatePullRequests(count = 50): Promise<PullRequest
     .filter((item) => !/dependabot|renovate|github-actions/i.test(item.user.login) && !/^(ci|docs|chore|build|test|style)(\(|:|\s)/i.test(item.title))
     // Search results carry the description and author, so unsigned PRs are dropped before costing two API calls each.
     .filter((item) => madeWithTool(item))
+    .filter((item) => !done.has(prKey(item.html_url)))
     .filter((item) => (seen.has(item.html_url) ? false : (seen.add(item.html_url), true)))
     .sort(() => Math.random() - 0.5)
     // Well-known repos first; smaller ones only fill the remaining slots.
