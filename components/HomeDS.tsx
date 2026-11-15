@@ -407,6 +407,18 @@ export function HomeDS({ puzzles, jobs = [] }: { puzzles: Summary[]; jobs?: Job[
         // Only when the PR link field is open: a link left in a hidden field must not hijack "+ New puzzle".
         body: JSON.stringify({ prUrl: (showUrl && prUrl.trim()) || undefined, family: kind === "all" ? undefined : kind }),
       });
+      if (response.status === 429) {
+        // Rate limited by the Vercel firewall (before our route runs): a friendly pause, not an error.
+        const seconds = Number(response.headers.get("retry-after"));
+        const wait = seconds > 0 ? (seconds < 90 ? `${Math.ceil(seconds)} seconds` : `${Math.ceil(seconds / 60)} minutes`) : "a little while";
+        setError(`Too many new puzzles at once. Try again in ${wait}.`);
+        stage.current.show = { ...stage.current.show!, mode: "error", headline: "TAKING A BREATHER" };
+        setProgress(null);
+        sayNow({ who: "add", text: `Phew, the puzzle machine needs a breather! Try again in ${wait}. Meanwhile, pick one we already made.` });
+        setBusy(false);
+        return;
+      }
+      if (!response.ok) throw new Error(`The server said no (${response.status}). Try again?`);
       if (!response.body) throw new Error("No response from the server.");
       const reader = response.body.getReader();
       const decoder = new TextDecoder();

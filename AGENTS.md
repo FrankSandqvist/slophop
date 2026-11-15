@@ -203,7 +203,8 @@ npm run build
 
 ## Known gaps
 
-- No rate limiting on generation or votes.
+- Generation is rate limited by a Vercel firewall rule on `POST /api/puzzles` (429 before our route runs; the home
+  screen turns it into a "needs a breather" line, using Retry-After when sent). Votes have no rate limit.
 - The truth table / sampled numbers are only as faithful as Gemini's Python model of the diff; nothing cross-checks them.
 - Visual puzzles are Gemini's reading of CSS/markup drawn as shapes; nothing renders the real code.
 - Puzzles where nothing changes behaviour (pure refactors) produce weaker rounds.
