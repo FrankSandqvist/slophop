@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SlopHop pitch</title>
+<link rel="stylesheet" href="assets/font.css">
+<style>
+  /* The game's tokens (app/globals.css). Green and red only ever mean Green (new code) and Red (old code). */
+  :root {
+    --ink: #1b1a22; --paper: #fffbe9; --bezel: #1f1e26; --line: #e7e4f0;
+    --green: #3ddc5a; --red: #ff4757;
+    --yellow: #ffcf33; --sky: #6ec6ea; --lavender: #c4b3f0; --grey: #7d715a; /* warm, to sit on the beige paper */
+    --pixel: "DotGothic16", ui-monospace, monospace;
+    --drop: 10px 10px 0 rgba(27, 26, 34, .16);
+  }
+  @page { size: 1920px 1080px; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--paper); }
+  body { font-family: var(--pixel); color: var(--ink); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  img { display: block; }
+  h1, h2, p { margin: 0; font-weight: normal; }
+
+  /* One slide = one page, centred. The game menu's paper: beige with a faint ink grid. */
+  .slide {
+    position: relative; width: 1920px; height: 1080px; overflow: hidden; page-break-after: always; break-after: page;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+    padding: 80px 128px;
+    background-color: var(--paper);
+    background-image: linear-gradient(rgba(27,26,34,.06) 2px, transparent 2px), linear-gradient(90deg, rgba(27,26,34,.06) 2px, transparent 2px);
+    background-size: 16px 16px;
+  }
+  .slide:last-child { page-break-after: auto; break-after: auto; }
+  body { counter-reset: slide; }
+  .slide { counter-increment: slide; }
+  .num { position: absolute; right: 48px; bottom: 32px; font-size: 32px; color: var(--grey); }
+  .num::after { content: counter(slide); }
+
+  /* Type: DotGothic16 at multiples of 16px. Highlights are a yellow marker, like a selected menu row. */
+  .t32 { font-size: 32px; line-height: 48px; }
+  .t48 { font-size: 48px; line-height: 64px; }
+  .t64 { font-size: 64px; line-height: 80px; }
+  .t96 { font-size: 96px; line-height: 112px; }
+  .t128 { font-size: 128px; line-height: 144px; }
+  /* A block exactly one line tall: an inline background covers the font's full height and would spill onto the lines around it. */
+  .hl { display: inline-block; line-height: inherit; background: var(--yellow); padding: 0 16px; }
+  .stack { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .dim { color: var(--grey); }
+  .gap-s { margin-top: 32px; } .gap-m { margin-top: 56px; } .gap-l { margin-top: 80px; }
+
+  /* Game pieces. */
+  .panel { background: #fff; border: 6px solid var(--ink); box-shadow: inset 0 -8px 0 var(--line), var(--drop); }
+  .textbox { position: relative; padding: 44px 40px 32px; background: #fff; border: 6px solid var(--ink); border-radius: 6px; box-shadow: inset 0 -8px 0 var(--line), var(--drop); font-size: 48px; line-height: 64px; text-align: left; }
+  .textbox .name { position: absolute; top: -28px; left: 24px; padding: 0 16px; border: 6px solid var(--ink); background: var(--bezel); color: #fff; font-size: 32px; line-height: 40px; }
+  .textbox.add .name { background: var(--green); color: var(--ink); }
+  .textbox.del .name { background: var(--red); color: #fff; }
+  .badge { display: inline-block; padding: 0 12px; border: 4px solid var(--ink); font-size: 32px; line-height: 40px; background: #fff; }
+  .badge.logic { background: var(--ink); color: #fff; }
+  .badge.math { background: var(--yellow); }
+  .badge.flow { background: var(--sky); }
+  .badge.ai { background: var(--lavender); }
+  .btn { display: inline-block; padding: 16px 40px 24px; border: 6px solid var(--ink); background: #fff; font-size: 48px; line-height: 64px; box-shadow: inset 0 -8px 0 rgba(0,0,0,.14), 0 8px 0 var(--ink); }
+  .btn.on { background: var(--yellow); }
+  .still { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border: 6px solid var(--ink); box-shadow: var(--drop); image-rendering: pixelated; }
+  .px { image-rendering: pixelated; }
+
+  /* 1: title */
+  .title .logo { width: 1248px; }
+  .title .cast { position: absolute; bottom: -48px; height: 600px; }
+  .title .cast.green { left: 176px; }
+  .title .cast.red { right: 176px; }
+  .play-along { position: absolute; right: 48px; top: 48px; display: flex; align-items: center; gap: 24px; font-size: 32px; line-height: 40px; text-align: right; }
+  .play-along img { width: 160px; height: 160px; border: 6px solid var(--ink); background: #fff; padding: 8px; }
+  /* Partner logos, centred along the bottom between the mascots; heights balanced by eye (the wordmarks differ in weight). */
+  .challenge { position: absolute; left: 50%; bottom: 72px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 32px; width: max-content; }
+  .challenge p { font-size: 32px; line-height: 40px; color: var(--grey); }
+  .partners { display: flex; align-items: center; justify-content: center; gap: 80px; }
+  .partners img { width: auto; }
+  .partners .tieto { height: 56px; }
+  .partners .deepmind { height: 44px; }
+  .partners .context { height: 52px; }
+
+  /* 3: everyday things */
+  .chips { display: flex; gap: 32px; justify-content: center; }
+  .chip { padding: 16px 32px 24px; font-size: 48px; line-height: 64px; }
+
+  /* 4: resignation, in numbers */
+  .stats.two { grid-template-columns: repeat(2, 640px); gap: 96px; }
+  .stats.two b { font-size: 128px; line-height: 144px; }
+  .stats.two span { font-size: 48px; line-height: 64px; color: var(--ink); }
+  .source { font-size: 32px; line-height: 40px; color: var(--grey); }
+
+  /* 5: it's public. A real diff, the way GitHub shows it: added lines in Green's colours. */
+  .diff { width: 1440px; text-align: left; overflow: hidden; }
+  .diff-head { display: flex; justify-content: space-between; gap: 32px; padding: 16px 32px; border-bottom: 6px solid var(--ink); background: var(--ink); color: #fff; font-size: 32px; line-height: 40px; }
+  .diff-head .file { color: #cfc8b2; }
+  .diff pre { margin: 0; padding: 16px 0 24px; font-family: var(--pixel); font-size: 32px; line-height: 48px; }
+  .diff .add { display: block; padding: 0 32px; background: #e3f7e5; }
+  .diff .add::before { content: "+ "; color: var(--green-dark, #027d0a); }
+
+  /* 5: pillars */
+  .pillars { display: grid; grid-template-columns: repeat(3, 480px); gap: 48px; }
+  .pillar { padding: 40px 40px 48px; }
+  .pillar .step { font-size: 32px; line-height: 40px; color: var(--grey); }
+  .pillar h2 { font-size: 48px; line-height: 64px; margin: 8px 0 24px; }
+  .pillar p { font-size: 32px; line-height: 48px; }
+
+  /* 5: yesterday */
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 40px; width: 100%; }
+  .case p { font-size: 32px; line-height: 48px; margin-top: 24px; }
+  .case .meta { display: flex; gap: 16px; justify-content: center; align-items: center; margin-top: 16px; font-size: 32px; line-height: 40px; color: var(--grey); }
+
+  /* 6: today (the one dark slide: a cutscene frame) */
+  .today { color: #fff; }
+  .today .bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; filter: brightness(.4) saturate(.85); image-rendering: pixelated; }
+  .today > *:not(.bg) { position: relative; text-shadow: 6px 6px 0 var(--ink); }
+  .today .hl { color: var(--ink); text-shadow: none; }
+
+  /* 7: cast */
+  .meet { display: grid; grid-template-columns: 200px 1fr 200px; gap: 56px; align-items: center; width: 100%; }
+  .meet img { height: 640px; margin: 0 auto; }
+  .meet .lines { display: grid; gap: 72px; }
+
+  /* 8: how it plays */
+  .rules { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; width: 100%; }
+  .rules .textbox { font-size: 32px; line-height: 48px; }
+  .rules ul { margin: 0; padding-left: 36px; }
+  .rules li + li { margin-top: 12px; }
+  .tag { display: inline-block; padding: 0 8px; margin-right: 8px; border: 4px solid var(--ink); }
+  .tag.new { background: var(--green); }
+  .tag.gone { background: var(--red); color: #fff; }
+  .loop { display: flex; align-items: center; justify-content: center; gap: 24px; font-size: 32px; line-height: 40px; }
+  .loop .step { padding: 16px 24px 24px; }
+  .loop .arrow { font-size: 32px; }
+  .kinds { display: flex; gap: 16px; justify-content: center; }
+
+  /* 9: the crew */
+  .crew { display: grid; grid-template-columns: repeat(4, 1fr); gap: 32px; width: 100%; }
+  .role { padding: 24px 24px 28px; }
+  .role .who { font-size: 32px; line-height: 40px; color: var(--grey); }
+  .role h2 { display: inline-block; margin: 8px 0 12px; padding: 0 12px; background: var(--ink); color: #fff; font-size: 32px; line-height: 48px; }
+  .role p { font-size: 32px; line-height: 40px; }
+  .role.source { background: var(--yellow); }
+  .role.source h2 { background: #fff; color: var(--ink); box-shadow: inset 0 0 0 4px var(--ink); }
+
+  /* 10: vote */
+  .vote-card { padding: 40px 64px 56px; }
+  .vote-card .opts { display: flex; gap: 32px; justify-content: center; margin-top: 32px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 440px); gap: 48px; }
+  .stat b { display: block; font-weight: normal; font-size: 96px; line-height: 112px; }
+  .stat span { font-size: 32px; line-height: 40px; color: var(--grey); }
+
+  /* 11: next */
+  .next { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; width: 100%; }
+  .next .panel { padding: 48px; }
+  .next h2 { font-size: 64px; line-height: 80px; margin-bottom: 24px; }
+  .next p { font-size: 32px; line-height: 48px; }
+
+  /* 12: end */
+  .end-row { display: flex; align-items: center; justify-content: center; gap: 80px; }
+  .end-row .head { width: 192px; height: 192px; }
+  .qr { width: 400px; padding: 24px; background: #fff; border: 6px solid var(--ink); box-shadow: var(--drop); }
+  .qr img { width: 100%; }
+</style>
+</head>
+<body>
+
+<!-- 1 · Title -->
+<section class="slide title">
+  <div class="play-along"><span>Play along<br>slophop.vercel.app</span><img src="assets/qr.svg" alt="QR code to slophop.vercel.app"></div>
+  <img class="cast green px" src="assets/green-cheer.png" alt="">
+  <img class="cast red px" src="assets/red-idle.png" alt="">
+  <img class="logo px" src="assets/logo.png" alt="SlopHop">
+  <p class="t48 gap-m">Learn the logic that runs the world,<br>see how it's changing, and weigh in.</p>
+  <div class="challenge">
+    <p>My submission for Tieto's Earned Trust in AI Code challenge</p>
+    <div class="partners">
+      <img class="tieto" src="assets/logos/tieto.png" alt="Tieto">
+      <img class="deepmind" src="assets/logos/deepmind.svg" alt="Google DeepMind">
+      <img class="context" src="assets/logos/context-dev.svg" alt="Context.dev">
+    </div>
+  </div>
+</section>
+
+<!-- 2 · The question -->
+<section class="slide">
+  <h1 class="t128">How does the world <span class="hl">work?</span></h1>
+  <p class="t64 dim gap-m">Most people don't know.</p>
+  <span class="num"></span>
+</section>
+
+<!-- 3 · Software, written by AI -->
+<section class="slide">
+  <h1 class="t96">The world runs on software.<br>Now, more of it is written by <span class="hl">AI.</span></h1>
+  <div class="chips gap-l">
+    <span class="chip panel">your money</span>
+    <span class="chip panel">your health records</span>
+    <span class="chip panel">your car</span>
+  </div>
+  <p class="t64 gap-l">They change every day. <span class="dim">You never see it.</span></p>
+  <span class="num"></span>
+</section>
+
+<!-- 4 · Resignation -->
+<section class="slide">
+  <h1 class="t96">People want a say.<br>Most feel they have <span class="hl">none.</span></h1>
+  <div class="stats two gap-l">
+    <div class="stat"><b>61%</b><span>want more control over how AI is used in their lives</span></div>
+    <div class="stat"><b>13%</b><span>feel they have a lot of control over it</span></div>
+  </div>
+  <p class="source gap-s">Pew Research Center, 2025 · 5,023 U.S. adults</p>
+  <p class="t48 gap-l">Researchers call it <span class="hl">AI resignation</span>: AI as<br>"an overpowering and seemingly inevitable force."</p>
+  <p class="source gap-s">Siebold, Witschas &amp; Mühlhoff, Future Humanities, 2026</p>
+  <span class="num"></span>
+</section>
+
+<!-- 5 · It's public -->
+<section class="slide">
+  <h1 class="t96">The twist? Much of it is <span class="hl">public.</span></h1>
+  <p class="t48 gap-s">Open source: every change, out in the open, for anyone to read.</p>
+  <div class="diff panel gap-m" aria-label="A real change: flexprice pull request 3401">
+    <div class="diff-head"><span>flexprice/flexprice #3401 · merged · made with Claude Code</span><span class="file">payment.go</span></div>
+    <pre><span class="add">// voidOpenPaymentLinks closes the unpaid payment links on a voided…</span><span class="add">func (s *paymentService) voidOpenPaymentLinks(ctx, invoiceID string) {</span><span class="add">    filter.DestinationID = lo.ToPtr(invoiceID)</span><span class="add">    filter.PaymentStatus = lo.ToPtr(string(types.PaymentStatusPending))</span></pre>
+  </div>
+  <p class="t64 gap-m">Anyone can read it. Almost nobody does.<br>So we turn it into <span class="hl">games.</span></p>
+  <span class="num"></span>
+</section>
+
+<!-- 5 · SlopHop -->
+<section class="slide">
+  <h1 class="t96">You don't need to read code.<br>You need to follow the <span class="hl">logic.</span></h1>
+  <p class="t48 gap-s">Never written a line of code? You're exactly who this is for.</p>
+  <div class="pillars gap-m">
+    <div class="pillar panel"><div class="step">01</div><h2>Learn what's changing</h2><p>Real updates to the software around you, made with AI, as they happen.</p></div>
+    <div class="pillar panel"><div class="step">02</div><h2>Learn the logic</h2><p>Not the code, but the rules it follows.</p></div>
+    <div class="pillar panel"><div class="step">03</div><h2>Judge it</h2><p>Does the new behaviour actually make sense?</p></div>
+  </div>
+  <span class="num"></span>
+</section>
+
+<!-- 5 · Yesterday -->
+<section class="slide">
+  <h1 class="t96">Yesterday…</h1>
+  <div class="grid4 gap-m">
+    <div class="case">
+      <img class="still" src="assets/still-flexprice.png" alt="Cutscene: a cage slams shut over a payment terminal">
+      <p>…you could still pay an invoice that had been cancelled.</p>
+      <div class="meta"><span class="badge flow">FLOW</span>flexprice ★6.9k</div>
+    </div>
+    <div class="case">
+      <img class="still" src="assets/still-agentrun.png" alt="Cutscene: a golden key lies on the path">
+      <p>…an AI agent wrote its own secret keys into its notes.</p>
+      <div class="meta"><span class="badge ai">AI</span>agentrun ★959</div>
+    </div>
+    <div class="case">
+      <img class="still" src="assets/still-tacs.png" alt="Cutscene: Red under a huge metal slab">
+      <p>…an aircraft wing simulator made parts eight times too heavy.</p>
+      <div class="meta"><span class="badge math">MATH</span>TACS ★171</div>
+    </div>
+    <div class="case">
+      <img class="still" src="assets/still-saleor.png" alt="Cutscene: Red and Green in a warehouse">
+      <p>…a warehouse screen hid how many items to pack.</p>
+      <div class="meta"><span class="badge">UX</span>Saleor ★1k</div>
+    </div>
+  </div>
+  <p class="t48 gap-m">Every one written with an AI coding tool, <span class="hl">and approved by a person.</span></p>
+  <span class="num"></span>
+</section>
+
+<!-- 6 · Today -->
+<section class="slide today">
+  <img class="bg" src="assets/still-flexprice-end.png" alt="">
+  <p class="t48">Soon, no person will check every change by hand.<br>Wouldn't you still want to know what's changing?</p>
+  <h1 class="t128 gap-m stack"><span class="hl">Today, you can</span><span class="hl">play the fix.</span></h1>
+  <p class="t48 gap-m">And keep your logical thinking sharp while you're at it.</p>
+  <span class="num"></span>
+</section>
+
+<!-- 7 · Meet Red and Green -->
+<section class="slide">
+  <h1 class="t96">Meet Red and Green.</h1>
+  <div class="meet gap-m">
+    <img class="px" src="assets/red-talk.png" alt="Red">
+    <div class="lines">
+      <div class="textbox del"><span class="name">RED</span>I'm the old code: the part that got deleted. Somebody has to be.</div>
+      <div class="textbox add"><span class="name">GREEN</span>And I'm what replaced it. Every puzzle is us two arguing over one real change.</div>
+    </div>
+    <img class="px" src="assets/green-cheer.png" alt="Green">
+  </div>
+  <span class="num"></span>
+</section>
+
+<!-- 8 · How it plays -->
+<section class="slide">
+  <h1 class="t64">Read their rules. Work out who does what.</h1>
+  <p class="t32 dim gap-s">From the puzzle "Dead Links Tell No Bills", a real change to flexprice</p>
+  <div class="rules gap-m">
+    <div class="textbox del"><span class="name">RED'S OLD RULES</span>
+      <ul>
+        <li>Sending a payment link opens a pending payment.</li>
+        <li><span class="tag gone">GONE</span>Voiding the invoice leaves its links open.</li>
+        <li><span class="tag gone">GONE</span>Any open link can still be paid.</li>
+      </ul>
+    </div>
+    <div class="textbox add"><span class="name">GREEN'S NEW RULES</span>
+      <ul>
+        <li>Sending a payment link opens a pending payment.</li>
+        <li><span class="tag new">NEW</span>Voiding closes open Stripe or Razorpay links.</li>
+        <li><span class="tag new">NEW</span>A voided payment can't be paid any more.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="loop gap-m">
+    <span class="step panel">Cutscene</span><span class="arrow">▶</span>
+    <span class="step panel">Rules</span><span class="arrow">▶</span>
+    <span class="step panel">3–5 puzzles</span><span class="arrow">▶</span>
+    <span class="step panel">Vote</span>
+  </div>
+  <div class="kinds gap-s"><span class="badge logic">LOGIC</span><span class="badge math">MATH</span><span class="badge">UX</span><span class="badge flow">FLOW</span><span class="badge ai">AI</span></div>
+  <span class="num"></span>
+</section>
+
+<!-- 9 · How a puzzle is made -->
+<section class="slide">
+  <h1 class="t96">A whole AI crew.</h1>
+  <p class="t32 dim gap-s">Every puzzle is made in about a minute, all at once.</p>
+  <div class="crew gap-m">
+    <div class="role panel source"><div class="who">GitHub</div><h2>THE SOURCE</h2><p>Merged, approved pull requests signed by an AI tool.</p></div>
+    <div class="role panel"><div class="who">Gemini Decisions API</div><h2>THE SCOUT</h2><p>Scores ~50 fresh PRs at once: small? relatable?</p></div>
+    <div class="role panel"><div class="who">Gemini 4 Argon</div><h2>THE WRITER</h2><p>Writes Red's old rules and Green's new ones.</p></div>
+    <div class="role panel"><div class="who">Gemini code execution</div><h2>THE FACT-CHECKER</h2><p>Runs the old and new code in Python. No guessing.</p></div>
+    <div class="role panel"><div class="who">Lyria</div><h2>THE COMPOSER</h2><p>A looping soundtrack at the project's tempo.</p></div>
+    <div class="role panel"><div class="who">Gemini Omni Flash</div><h2>THE DIRECTOR</h2><p>A 15-second cutscene straight out of 1998.</p></div>
+    <div class="role panel"><div class="who">Gemini + Google Search + Context.dev</div><h2>THE JOURNALIST</h2><p>Who uses it: real numbers, sources, logos.</p></div>
+    <div class="role panel"><div class="who">Gemini</div><h2>THE TEACHER</h2><p>Explains every case you just solved.</p></div>
+  </div>
+  <span class="num"></span>
+</section>
+
+<!-- 10 · Your turn -->
+<section class="slide">
+  <h1 class="t64">Then it's your turn. Every vote is a<br><span class="hl">human sniff test</span> on code a machine wrote.</h1>
+  <div class="vote-card panel gap-m">
+    <p class="t48">Is Green's way right for this case?</p>
+    <div class="opts"><span class="btn on">Right</span><span class="btn">Off</span></div>
+  </div>
+  <div class="stats gap-l">
+    <div class="stat"><b>47</b><span>puzzles from real pull requests so far</span></div>
+    <div class="stat"><b>5</b><span>kinds: logic, math, UX, flows and AI guardrails</span></div>
+    <div class="stat"><b>~60s</b><span>from a fresh pull request to a playable game</span></div>
+  </div>
+  <span class="num"></span>
+</section>
+
+<!-- 11 · With more time -->
+<section class="slide">
+  <h1 class="t96">With more than<br>a hackathon's time…</h1>
+  <div class="next gap-l">
+    <div class="panel"><h2>Close the loop</h2><p>Votes go back where they matter: to the people who approved the change, and to the AI tools that wrote it. Where players doubt Green, someone takes a second look.</p></div>
+    <div class="panel"><h2>Zoom out</h2><p>Not just one small change, but whole updates and whole projects at once. Follow how the apps you use every day evolve, one puzzle at a time.</p></div>
+  </div>
+  <span class="num"></span>
+</section>
+
+<!-- 12 · Punchline -->
+<section class="slide">
+  <h1 class="t96">AI writes the code.<br><span class="hl">SlopHop keeps you in the loop.</span></h1>
+  <div class="end-row gap-m">
+    <img class="head px" src="assets/red-head.png" alt="">
+    <div class="qr"><img src="assets/qr.svg" alt="QR code to slophop.vercel.app"></div>
+    <img class="head px" src="assets/green-head.png" alt="">
+  </div>
+  <p class="t48 gap-m">slophop.vercel.app · play the live demo and hop some slop</p>
+</section>
+
+</body>
+</html>

@@ -8,13 +8,15 @@
 
 ## The problem
 
-The world runs on software, and more and more of it is written by AI. Much of that code is open source: every change is public, for anyone to read. Almost nobody does. Trust in AI-written code can't just be assumed; it has to be earned by people who understand what changed. Following that used to be a coder's job. But you don't need to read code. You need to follow the logic.
+The world runs on software, and more and more of it is written by AI. Much of that code is open source: every change is public, for anyone to read. Almost nobody does.
+
+People feel shut out: in a 2025 [Pew survey](https://www.pewresearch.org/science/2025/09/17/how-americans-view-ai-and-its-impact-on-people-and-society/), 61% of Americans wanted more control over how AI is used in their lives, but only 13% felt they had much. Researchers now call it [AI resignation](https://doi.org/10.1002/fhu2.70026): experiencing AI as "an overpowering and seemingly inevitable force" (Siebold et al., 2026). Trust in AI-written code can't just be assumed; it has to be earned by people who understand what changed. Following that used to be a coder's job. But you don't need to read code. You need to follow the logic.
 
 ## What SlopHop does
 
 SlopHop turns real, recently merged pull requests written with AI coding tools (Claude Code, Copilot, Cursor, Codex, Devin, Jules) into short puzzles anyone can play.
 
-Two pixel mascot dudes in every puzzle: **Red**, the code that was removed, and **Green**, the code that replaced it.
+Two pixel mascot dudes star in every puzzle: **Red**, the code that was removed, and **Green**, the code that replaced it.
 
 1. **Meet the change** in a 15-second PS1-style cutscene, then read Red's old rules and Green's new ones.
 2. **Work it out** in three to five quick puzzles about what each of them does.

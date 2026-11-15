@@ -188,7 +188,7 @@ function drawBoard(ctx: CanvasRenderingContext2D, show: StageShow | undefined, t
     drawGlyphs(ctx, "SLOP", x, 25 + bounce, "#28c840", 3);
     drawGlyphs(ctx, "HOP", x + slop + 4 + 2, 25 - bounce + 2, "#1b1a22", 3);
     drawGlyphs(ctx, "HOP", x + slop + 4, 25 - bounce, "#ff4757", 3);
-    const ticker = `${show?.headline ? show.headline + "  *  " : ""}REAL CODE CHANGES  *  TINY BRAIN TEASERS  *  `;
+    const ticker = `${show?.headline ? show.headline + "  *  " : ""}LEARN THE LOGIC THAT RUNS THE WORLD  *  SEE HOW IT'S CHANGING  *  WEIGH IN  *  `;
     const offset = Math.floor((t * 18) % (ticker.length * 4));
     ctx.fillStyle = "#1b1a22";
     ctx.fillRect(0, 58, BOARD_W, 13);

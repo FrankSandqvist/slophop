@@ -60,7 +60,7 @@ const DEMO_PROPS: PropSpec[] = [
 const INTRO: Line[] = [
   { who: "add", text: "I'm Green. Every line a pull request adds? That's me." },
   { who: "del", text: "I'm Red. Every line it deletes. Somebody has to." },
-  { who: "add", text: "Real code changes from out in the world. Tiny brain teasers. Pick one below!" },
+  { who: "add", text: "Learn the logic that runs the world, see how it's changing, and weigh in. Pick one below!" },
   { who: "del", text: "Got a pull request of your own in mind? Tap PR link, paste it, and we'll puzzle that one up instead." },
 ];
 
@@ -499,7 +499,7 @@ export function HomeDS({ puzzles, jobs = [] }: { puzzles: Summary[]; jobs?: Job[
             <h1 className="logo">
               <Logo />
             </h1>
-            <p>Real code changes. Tiny brain teasers.</p>
+            <p>Learn the logic that runs the world, see how it's changing, and weigh in.</p>
           </header>
 
           {howto && <HowToPlay item={(line as TutorialLine | null)?.item} onClose={closeHowto} />}

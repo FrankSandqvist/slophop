@@ -4,7 +4,7 @@ Keep this file current as SlopHop evolves. It describes what is true now.
 
 ## Product
 
-SlopHop shows curious people what is changing in the public software around them, as tiny brain teasers.
+Tagline: "Learn the logic that runs the world, see how it's changing, and weigh in." SlopHop shows curious people what is changing in the public software around them, as tiny brain teasers.
 Every puzzle is built from one real, public GitHub pull request, cut down to one small change, so players'
 answers and votes can be crowdsourced per case. Three kinds ("families", `lib/families.ts` for the last two):
 - **logic** — conditions decide an outcome (truth table).
@@ -191,6 +191,12 @@ modelling wait with kind-specific banter. `FMV=off` skips the cutscene (cheap te
   (`pr.madeWith`, from `madeWithTool`); never guess from style.
 - Generation costs money (Gemini + Lyria + Omni video ≈$0.35). Never backfill cutscenes for older puzzles. Discuss before adding auto-generation or crawlers.
 - The owner does visual QA; agents test logic (typecheck, lint, scripted pipeline runs), not screenshots.
+
+## Pitch
+
+`pitch/`: the pitch deck, `deck.html` (12 slides, 1920x1080, the game's look) printed to `SlopHop-pitch.pdf` by
+`node pitch/build.mjs` (headless Chrome; reports anything that overflows its slide). `npx tsx pitch/make-assets.ts`
+re-renders the logo and mascot PNGs from `lib/`. The pixel font is a local subset (`assets/font.css`) for the characters used.
 
 ## Commands
 

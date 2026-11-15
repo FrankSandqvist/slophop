@@ -10,7 +10,7 @@ export type TutorialLine = Line & { item?: number };
 
 /** What the three say on a first visit to the landing page. */
 export const TUTORIAL: TutorialLine[] = [
-  { who: "narrator", text: "Welcome to SlopHop! Real code changes from the software around you, as tiny brain teasers." },
+  { who: "narrator", text: "Welcome to SlopHop! Learn the logic that runs the world, see how it's changing, and weigh in." },
   { who: "del", text: "I'm Red: the OLD code. I show how things worked before a change." },
   { who: "add", text: "And I'm Green: the NEW code. I show how things work now!" },
   { who: "narrator", text: "Each puzzle opens with a short movie and our two rulebooks: that's the change.", item: 0 },
